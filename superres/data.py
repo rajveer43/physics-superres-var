@@ -142,12 +142,24 @@ class _ParquetSource:
 
     def __init__(self, path):
         import pyarrow.parquet as pq
+        self.path = path
         self.pf = pq.ParquetFile(path)
         self.n = self.pf.metadata.num_rows
         cols = self.pf.schema_arrow.names
         self.xcol = next(c for c in IMG_KEYS if c in cols)
         self.ycol = next((c for c in LABEL_KEYS if c in cols), None)
         self.const_label = None if self.ycol else _label_from_name(path)
+
+    @staticmethod
+    def _images(col):
+        """Nested list column -> (k, *image_shape) float32 without going through Python lists."""
+        import pyarrow as pa
+        shape = np.asarray(col[0].as_py()).shape  # one row only, to learn the nesting
+        flat = col
+        while pa.types.is_list(flat.type) or pa.types.is_large_list(flat.type) \
+                or pa.types.is_fixed_size_list(flat.type):
+            flat = flat.flatten()
+        return flat.to_numpy(zero_copy_only=False).astype(np.float32).reshape(len(col), *shape)
 
     def iter_selected(self, idx, C, chunk=512):
         import pyarrow as pa
@@ -158,7 +170,7 @@ class _ParquetSource:
             lo, hi = np.searchsorted(idx, start), np.searchsorted(idx, start + b)
             if hi > lo:
                 taken = batch.take(pa.array(idx[lo:hi] - start))
-                X = _to_nchw(np.array(taken.column(self.xcol).to_pylist(), dtype=np.float32), C)
+                X = _to_nchw(self._images(taken.column(self.xcol)), C)
                 y = (np.asarray(taken.column(self.ycol).to_pylist(), dtype=np.float64).reshape(len(X), -1)[:, -1]
                      if self.ycol else np.full(len(X), float(self.const_label)))
                 yield X, y
