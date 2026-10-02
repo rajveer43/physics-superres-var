@@ -30,16 +30,23 @@ means 2x, 4x and 8x upscaling for jets.
    token is replaced by the LR measurement. An LR encoder provides the start
    token and the AdaLN condition, and adds a spatial feature map to every
    scale's tokens. One model is trained per LR level.
-4. **LR projection (optional).** The SR output is rescaled so every block
-   reproduces its measured coarse-cell energy exactly. Both `var-raw` and `var`
-   (projected) are evaluated.
-5. **Baselines.** `lr` (the coarse grid itself) and `uniform` (each coarse
-   cell's energy spread evenly over its fine cells).
-6. **Downstream taggers.** One CNN architecture is tuned once on HR, then
-   trained separately on every input: HR, each LR grid, each uniform grid and
-   each VAR output.
+4. **What is compared.** The result is the model output exactly as generated
+   (`sr`), set against the HR truth and the LR input. The training target is
+   always the HR truth: the tokenizer learns to rebuild HR images, and the
+   transformer learns to predict the tokens of the HR image from the LR image.
+5. **Downstream taggers.** One CNN architecture is tuned once on HR, then
+   trained separately on HR, each LR grid and each SR output.
    - qg: quark vs gluon classification
    - calo: incident-energy regression
+6. **Diagnostics**, kept out of the main figures and tables:
+   - `vqrec`: HR → tokens → HR by the tokenizer alone. This is the best any
+     token-predicting model could do with this tokenizer.
+   - `sr-greedy` / `sr-sample`: the two decoding modes (most likely token vs
+     sampled token).
+   - `uniform`: each coarse cell's energy spread evenly over its fine cells, a
+     no-learning reference.
+   - `srproj`: SR rescaled so every coarse cell matches its measured energy.
+     It is post-processing and never part of training.
 
 The 2-D (jets) and 3-D (showers) models share code. The calorimeter angular axis
 uses periodic padding.
@@ -99,10 +106,10 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 | `train_vqvae` | Full VQ-VAE training with the tuned parameters | `runs/<ds>__vqvae__hr__s42/` |
 | `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `optuna/<ds>__var__all*` |
 | `train_var` | One conditional VAR per LR level | `runs/<ds>__var__<level>__s42/` |
-| `generate` | VAR SR for all train/val/test events | `/content/data/cache/<ds>/*_sr-var_<level>.npy` |
-| `eval_sr` | Observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots | `runs/<ds>__sreval__<level>/` |
+| `generate` | VAR output as generated, for the splits in `var.gen_splits` and the decodings in `var.decodes` (sample, greedy) | `/content/data/cache/<ds>/*_sr-var_<level>.npy`, `*_sr-greedy_<level>.npy` |
+| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots; diagnostics in `figures/diagnostics/` | `runs/<ds>__sreval__<level>/` |
 | `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `optuna/<ds>__tagger__hr*` |
-| `train_taggers` | Tagger/regressor for `hr`, then `lr`, `uniform` and `var` at every level, for each seed | `runs/<ds>__tagger__<input>__s<seed>/` |
+| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `runs/<ds>__tagger__<input>__s<seed>/` |
 | `summarize` | Tables, plots and a markdown report across all runs | `summary/` |
 
 Every training stage resumes from `last.pt` on Drive. Optuna studies resume from
@@ -127,6 +134,7 @@ MyDrive/superres_results/            (…_smoke/ and …_fake/ for test runs)
         <dataset>__tagger_runs.csv    one row per tagger run
         <dataset>__tagger_summary.csv mean and std over seeds
         <dataset>__sr_observables.csv all observable comparisons
+        <dataset>__values__<level>.csv  mean of each quantity: HR | LR | SR | diagnostics
         <dataset>__sr_w1_table.csv    observable x (level, method) W1 table
         <dataset>__c2st_closure.csv   two-sample-test AUC and LR closure
         <dataset>__report.md          all tables in one page
@@ -134,8 +142,9 @@ MyDrive/superres_results/            (…_smoke/ and …_fake/ for test runs)
 ```
 
 - `stage` is one of `vqvae`, `var`, `sreval` or `tagger`.
-- `variant` is the input or level, e.g. `hr`, `pool4x4`, `lr-pool4x4`,
-  `uniform-pool4x4` or `var-pool4x4`.
+- `variant` is the input or level, e.g. `hr`, `pool4x4`, `lr-pool4x4` or
+  `sr-pool4x4`. Runs made before the raw output became the main result are
+  named `var-…` (that was SR with the energy constraint) and are read as such.
 - Names contain no timestamps, so later stages can find earlier outputs. The
   creation time is stored in `config.json` instead.
 

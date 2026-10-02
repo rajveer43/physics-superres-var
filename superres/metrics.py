@@ -40,8 +40,8 @@ def classification_metrics(y, score, n_boot=100, seed=0):
         aucs.append(roc_auc_score(y[i], score[i]))
         rejs.append(rejection_at(y[i], score[i], 0.5))
     if aucs:
-        out["auc_std"] = float(np.std(aucs))
-        out["rej_at_eff50_std"] = float(np.std(rejs))
+        out["auc_boot_err"] = float(np.std(aucs))  # uncertainty from resampling the test set
+        out["rej_at_eff50_boot_err"] = float(np.std(rejs))
     return out
 
 

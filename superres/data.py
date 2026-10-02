@@ -6,7 +6,9 @@ Cache (local disk, numpy memmaps, linear energies, float32):
     {split}_hr.npy        (N, C, *hr_shape)       zero-padded ground truth
     {split}_{level}.npy   (N, C, *hr_shape / f)   sum-pooled low resolution
     {split}_target.npy    (N,)                    qg: class label, calo: E_inc [MeV]
-    {split}_sr-var_{level}.npy                    VAR output (written by generate)
+    {split}_sr-var_{level}.npy                    VAR output, sampled tokens (written by generate)
+    {split}_sr-greedy_{level}.npy                 VAR output, most-likely tokens
+    test_vqrec.npy                                tokenizer-only reconstruction (written by eval_sr)
 
 Network inputs use x = log1p(E / (s_c * V)), where s_c is the mean non-zero
 cell energy of channel c and V the number of fine cells merged into one cell
@@ -361,9 +363,19 @@ def parse_kind(kind):
     return method, (level or None)
 
 
+# names used by runs made before the raw output became the primary result
+LEGACY_KINDS = {"var": "srproj", "varraw": "sr"}
+
+
 class CacheStore:
     """Access to cached arrays. kind is one of
-    'hr' | 'lr:<level>' | 'uniform:<level>' | 'var:<level>' | 'varraw:<level>'."""
+    'hr'                 ground truth
+    'lr:<level>'         sum-pooled image on its own coarse grid
+    'sr:<level>'         model output exactly as generated (the primary result)
+    'srsample:<level>' / 'srgreedy:<level>'   the two decoding modes explicitly
+    'srproj:<level>'     model output rescaled so each coarse cell matches the measurement (diagnostic)
+    'uniform:<level>'    coarse energy spread evenly over the fine pixels (diagnostic)
+    'vqrec'              HR -> tokens -> HR by the tokenizer alone (diagnostic)"""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -383,11 +395,17 @@ class CacheStore:
     def _mm(self, split, what):
         return np.load(self.path(split, what), mmap_mode="r")
 
-    def sr_path(self, split, level):
-        return self.path(split, f"sr-var_{level}")
+    def sr_path(self, split, level, decode="sample"):
+        """decode: 'sample' (tokens drawn from the predicted distribution) or 'greedy' (most likely token)."""
+        return self.path(split, f"sr-var_{level}" if decode == "sample" else f"sr-{decode}_{level}")
 
-    def has_sr(self, split, level):
-        return os.path.exists(self.sr_path(split, level))
+    def has_sr(self, split, level, decode="sample"):
+        return os.path.exists(self.sr_path(split, level, decode))
+
+    def sr_decode(self, method):
+        """Which stored SR file a method reads. 'sr' and 'srproj' follow cfg var.decode."""
+        primary = self.cfg["var"].get("decode", "sample")
+        return {"sr": primary, "srproj": primary, "srsample": "sample", "srgreedy": "greedy"}[method]
 
     def target(self, split):
         return np.load(self.path(split, "target"))
@@ -404,20 +422,23 @@ class CacheStore:
 
     def array(self, split, kind):
         method, level = parse_kind(kind)
+        method = LEGACY_KINDS.get(method, method)
         if method == "hr":
             return self._mm(split, "hr")
+        if method == "vqrec":  # tokenizer-only reconstruction of HR (written by evaluate)
+            return _Lazy(lambda a: a, self._mm(split, "vqrec"))
         f = self.levels[level]
         lr = self._mm(split, level)
         if method == "lr":
             return lr
         if method == "uniform":
             return _Lazy(lambda a: uniform_upsample(a, f), lr)
-        sr = np.load(self.sr_path(split, level), mmap_mode="r")
-        if method == "varraw":
-            return _Lazy(lambda a: a, sr)
-        if method == "var":
+        if method not in ("sr", "srproj", "srsample", "srgreedy"):
+            raise ValueError(f"unknown kind {kind}")
+        sr = np.load(self.sr_path(split, level, self.sr_decode(method)), mmap_mode="r")
+        if method == "srproj":  # SR with every coarse cell forced back to its measured energy
             return _Lazy(lambda a, b: project_to_lr(a, b, f), sr, lr)
-        raise ValueError(f"unknown kind {kind}")
+        return _Lazy(lambda a: a, sr)  # the model output as generated
 
 
 class SRDataset(Dataset):

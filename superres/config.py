@@ -85,7 +85,10 @@ DATASETS = {
             "patience": 8,
             "temperature": 1.0,
             "top_k": 0,
-            "greedy": False,
+            "decode": "sample",          # which output is "the" SR result: sample | greedy
+            "decodes": ["sample"],       # which outputs the generate stage writes
+            "gen_splits": ["train", "val", "test"],
+            "gen_overwrite": False,      # set true after retraining, to replace cached outputs
             "gen_batch_size": 128,
             "gen_max_per_split": None,
             "sr_dtype": "float16",       # halves disk use; pixel values are far below fp16 max
@@ -103,7 +106,12 @@ DATASETS = {
             "seeds": [42],
         },
         "eval": {"max_events": 4000, "c2st_max": 4000, "c2st_epochs": 5, "nsub_max": 2000,
-                 "hist_bins": 40, "n_examples": 4},
+                 "hist_bins": 40, "n_examples": 4,
+                 # main figures and tables: truth vs coarse vs model output as generated
+                 "methods": ["lr", "sr"],
+                 # extra rows / figures kept apart under figures/diagnostics
+                 "diagnostics": ["vqrec", "sr-greedy", "sr-sample", "uniform", "srproj"],
+                 "c2st_methods": ["sr"]},
     },
     # ------------------------------------------------------- CaloChallenge DS2
     "calo": {
@@ -153,7 +161,10 @@ DATASETS = {
             "patience": 8,
             "temperature": 1.0,
             "top_k": 0,
-            "greedy": False,
+            "decode": "sample",          # which output is "the" SR result: sample | greedy
+            "decodes": ["sample"],       # which outputs the generate stage writes
+            "gen_splits": ["train", "val", "test"],
+            "gen_overwrite": False,      # set true after retraining, to replace cached outputs
             "gen_batch_size": 256,
             "gen_max_per_split": None,
             "sr_dtype": "float32",       # core voxels of TeV showers can exceed fp16 range
@@ -171,7 +182,9 @@ DATASETS = {
             "seeds": [42],
         },
         "eval": {"max_events": 10000, "c2st_max": 10000, "c2st_epochs": 5, "hist_bins": 40,
-                 "n_examples": 3},
+                 "n_examples": 3, "methods": ["lr", "sr"],
+                 "diagnostics": ["vqrec", "sr-greedy", "sr-sample", "uniform", "srproj"],
+                 "c2st_methods": ["sr"]},
     },
 }
 

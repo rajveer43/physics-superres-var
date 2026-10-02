@@ -187,6 +187,9 @@ def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=
             model.vq.init_from(model.encode(next(iter(dl_tr))["hr"].to(dev)).float())
     epoch = start - 1
     for epoch in range(start, epochs):
+        if stopper.stop:  # resumed a run that had already early-stopped
+            print("already early-stopped; nothing to train")
+            break
         model.train()
         t0, run_loss, f_last = time.time(), 0.0, None
         for b in dl_tr:
@@ -203,8 +206,10 @@ def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=
             amp.step(loss, opt, model.parameters())
             run_loss += loss.item()
             step += 1
+        used = float((model.vq.usage > vc["dead_thresh"]).float().mean())  # before the reset below
         dead = model.vq.reinit_dead(f_last, vc["dead_thresh"])
         val = _eval_vqvae(model, dl_va, s, dev, amp, vc["dead_thresh"])
+        val["codebook_usage"] = used
         objective = val["val_rec_mse"] + val["val_energy_err_median"]
         improved = stopper.update(objective)
         row = {"epoch": epoch, "lr": lr, "train_loss": run_loss / len(dl_tr), **val,
@@ -293,6 +298,9 @@ def train_var(cfg, level, trial=None, epochs=None, max_train=None, save=True, re
     warm = min(1000, total // 10 + 1)
     epoch = start - 1
     for epoch in range(start, epochs):
+        if stopper.stop:  # resumed a run that had already early-stopped
+            print("already early-stopped; nothing to train")
+            break
         model.train()
         t0, run_loss = time.time(), 0.0
         for b in dl_tr:
@@ -326,33 +334,63 @@ def train_var(cfg, level, trial=None, epochs=None, max_train=None, save=True, re
 
 
 @torch.no_grad()
-def generate_sr(cfg, level, splits=("train", "val", "test")):
-    """Run VAR on every LR event and cache the (un-projected) SR energies."""
+def generate_sr(cfg, level, splits=None, decodes=None):
+    """Run VAR on LR events and cache the output exactly as generated (no energy correction).
+
+    decodes: 'sample' draws each token from the predicted distribution (var.temperature, var.top_k);
+             'greedy' always takes the most likely token."""
     dev, amp, store = device(), Amp(cfg), CacheStore(cfg)
     vc = cfg["var"]
+    splits = splits or vc.get("gen_splits") or ("train", "val", "test")
+    decodes = decodes or vc.get("decodes") or [vc.get("decode", "sample")]
     vq, _ = load_vqvae(cfg, store, dev)
     model = load_var(cfg, store, level, dev)
     s = scale_tensor(store, dev)
-    gen = torch.Generator(device=dev).manual_seed(cfg["seed"])
     dtype = np.float16 if vc.get("sr_dtype", "float32") == "float16" else np.float32
-    for split in splits:
-        n = store.meta["n"][split]
-        if vc["gen_max_per_split"]:
-            n = min(n, vc["gen_max_per_split"])
-        ds = SRDataset(store, split, level, max_n=n)
-        out = open_memmap(store.sr_path(split, level) + ".tmp", "w+", dtype, (n, store.C, *store.hr_shape))
-        i, t0 = 0, time.time()
-        for b in loader(ds, vc["gen_batch_size"], False, cfg):
-            with amp.ctx():
-                z = model.generate(b["lr"].to(dev), vq, vc["temperature"], vc["top_k"], vc["greedy"], gen)
-            E = to_energy(z.float(), s).cpu().numpy()
-            out[i:i + len(E)] = E.astype(dtype)
-            i += len(E)
-            print(f"\r  {level} {split}: {i}/{n}", end="")
-        out.flush()
-        del out
-        os.replace(store.sr_path(split, level) + ".tmp", store.sr_path(split, level))
-        print(f"  ({time.time() - t0:.0f}s)")
+    for decode in decodes:
+        gen = torch.Generator(device=dev).manual_seed(cfg["seed"])
+        for split in splits:
+            n = store.meta["n"][split]
+            if vc["gen_max_per_split"]:
+                n = min(n, vc["gen_max_per_split"])
+            path = store.sr_path(split, level, decode)
+            if os.path.exists(path) and not vc.get("gen_overwrite", False):
+                have = len(np.load(path, mmap_mode="r"))
+                if have >= n:
+                    print(f"  {level} {split} [{decode}]: {have} events already generated - skipping "
+                          f"(set var.gen_overwrite=true after retraining the model)")
+                    continue
+            ds = SRDataset(store, split, level, max_n=n)
+            out = open_memmap(path + ".tmp", "w+", dtype, (n, store.C, *store.hr_shape))
+            i, t0 = 0, time.time()
+            for b in loader(ds, vc["gen_batch_size"], False, cfg):
+                with amp.ctx():
+                    z = model.generate(b["lr"].to(dev), vq, vc["temperature"], vc["top_k"], decode == "greedy", gen)
+                E = to_energy(z.float(), s).cpu().numpy()
+                out[i:i + len(E)] = E.astype(dtype)
+                i += len(E)
+                print(f"\r  {level} {split} [{decode}]: {i}/{n}", end="")
+            out.flush()
+            del out
+            os.replace(path + ".tmp", path)
+            print(f"  ({time.time() - t0:.0f}s)")
+
+
+@torch.no_grad()
+def reconstruct_with_tokenizer(cfg, store, hr, batch_size=64):
+    """HR -> tokens -> HR with the tokenizer alone (no transformer). hr: linear energies (n, C, *grid).
+    This is the best any token-predicting model could do with this tokenizer."""
+    from .data import normalize
+    dev, amp = device(), Amp(cfg)
+    vq, _ = load_vqvae(cfg, store, dev)
+    s = scale_tensor(store, dev)
+    out = np.empty(hr.shape, dtype=np.float32)
+    for i in range(0, len(hr), batch_size):
+        x = torch.from_numpy(normalize(np.asarray(hr[i:i + batch_size], np.float32), store.scale, batch=True)).to(dev)
+        with amp.ctx():
+            rec, _, _ = vq(x)
+        out[i:i + len(x)] = to_energy(rec.float(), s).cpu().numpy()
+    return out
 
 
 # ------------------------------------------------------------------ taggers

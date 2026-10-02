@@ -19,7 +19,7 @@ ORDER = ["download", "prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_
 def tagger_kinds(cfg, levels=None):
     kinds = ["hr"]
     for lvl in levels or cfg["data"]["levels"]:
-        kinds += [f"lr:{lvl}", f"uniform:{lvl}", f"var:{lvl}"]
+        kinds += [f"lr:{lvl}", f"sr:{lvl}"]  # sr = model output as generated, no energy correction
     return kinds
 
 
