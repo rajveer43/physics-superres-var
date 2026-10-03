@@ -4,8 +4,15 @@ The encoder maps a log-energy image to a latent map f. f is quantised into K
 token maps r_1..r_K of increasing size with a shared codebook; each step
 quantises what the previous scales have not explained yet (residual design).
 The perceptual (LPIPS) and GAN losses of eq. (5) are dropped: they are tuned for
-natural images and mean nothing for energy deposits. Instead a total-energy term
-is added in the trainer.
+natural images and mean nothing for energy deposits. Instead a per-channel
+energy term is added in the trainer.
+
+Two changes for sparse detector images:
+  * the decoder has two heads per channel: a hit logit (is this cell above the
+    readout threshold?) and the log-energy if it is. Cells without a hit are
+    exactly zero, as after detector zero suppression, so no diffuse background;
+  * the decoder also sees the LR measurement (nearest-upsampled), so the fine
+    layout the LR already pins down does not have to pass through the tokens.
 """
 import torch
 import torch.nn as nn
@@ -46,7 +53,9 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, ndim, out_ch, widths, strides, z_ch, circ=(), n_res=1):
+    """Latent (+ LR image on the HR grid) -> per channel: log-energy and hit logit."""
+
+    def __init__(self, ndim, out_ch, widths, strides, z_ch, circ=(), n_res=1, lr_ch=0):
         super().__init__()
         c = widths[-1]
         layers = [ConvNd(ndim, z_ch, c, 3, circular_dims=circ), ResBlock(ndim, c, c, circ)]
@@ -56,11 +65,22 @@ class Decoder(nn.Module):
                 c = widths[i]
             if i > 0:
                 layers.append(Upsample(ndim, c, strides[i - 1], circ))
-        layers += [norm(c), nn.SiLU(), ConvNd(ndim, c, out_ch, 3, circular_dims=circ)]
-        self.net = nn.Sequential(*layers)
+        self.body = nn.Sequential(*layers)
+        self.lr_ch = lr_ch
+        if lr_ch:
+            self.lr_in = nn.Sequential(ConvNd(ndim, lr_ch, c, 3, circular_dims=circ), nn.SiLU(),
+                                       ConvNd(ndim, c, c, 3, circular_dims=circ))
+            self.fuse = ResBlock(ndim, 2 * c, c, circ)
+        self.head = nn.Sequential(norm(c), nn.SiLU(), ConvNd(ndim, c, 2 * out_ch, 3, circular_dims=circ))
+        with torch.no_grad():  # start from "almost every cell is empty" (p(hit) ~ 2%), as in the data
+            self.head[-1].conv.bias[out_ch:].fill_(-4.0)
 
-    def forward(self, z):
-        return self.net(z)
+    def forward(self, z, lr_up=None):
+        h = self.body(z)
+        if self.lr_ch:
+            h = self.fuse(torch.cat([h, self.lr_in(lr_up.to(h.dtype))], 1))
+        energy, hit_logit = self.head(h).chunk(2, dim=1)
+        return energy, hit_logit
 
 
 class Phi(nn.Module):
@@ -165,14 +185,24 @@ class MultiScaleVQ(nn.Module):
 
 
 class VQVAE(nn.Module):
-    def __init__(self, ndim, in_ch, cfg, circ=()):
+    """hit_level: per-channel readout threshold in normalised units, log1p(thr / s_c).
+    Images in and out are normalised log-energies on the HR grid; lr is the normalised
+    LR image on its own coarse grid."""
+
+    def __init__(self, ndim, in_ch, cfg, hr_shape, hit_level, circ=()):
         super().__init__()
         z = cfg["z_ch"]
+        self.hr_shape = tuple(hr_shape)
+        self.use_lr = bool(cfg.get("lr_decoder", True))
+        self.hit_threshold = float(cfg.get("hit_threshold", 0.5))
         self.enc = Encoder(ndim, in_ch, cfg["widths"], cfg["strides"], z, circ, cfg["n_res"])
         self.quant_conv = ConvNd(ndim, z, z, 3, circular_dims=circ)
         self.vq = MultiScaleVQ(ndim, cfg["codebook_size"], z, cfg["scales"], cfg["beta"], circ)
         self.post_quant_conv = ConvNd(ndim, z, z, 3, circular_dims=circ)
-        self.dec = Decoder(ndim, in_ch, cfg["widths"], cfg["strides"], z, circ, cfg["n_res"])
+        self.dec = Decoder(ndim, in_ch, cfg["widths"], cfg["strides"], z, circ, cfg["n_res"],
+                           lr_ch=in_ch if self.use_lr else 0)
+        self.register_buffer("hit_level", torch.as_tensor(hit_level, dtype=torch.float32)
+                             .view(1, -1, *([1] * ndim)))
 
     def encode(self, x):
         f = self.quant_conv(self.enc(x))
@@ -180,19 +210,41 @@ class VQVAE(nn.Module):
             raise ValueError(f"latent {tuple(f.shape[2:])} != last scale {self.vq.scales[-1]}")
         return f
 
-    def decode_fhat(self, f_hat):
-        """Raw decoder output in log-energy space; clamp at 0 before use."""
-        return self.dec(self.post_quant_conv(f_hat))
+    def _lr_up(self, lr):
+        if not self.use_lr:
+            return None
+        if lr is None:
+            raise ValueError("this tokenizer decodes with the LR image; pass lr")
+        return F.interpolate(lr, size=self.hr_shape, mode="nearest")
 
-    def forward(self, x):
+    def decode_raw(self, f_hat, lr=None):
+        """-> (log-energy, hit logit), both (B, C, *grid), used by the training losses."""
+        return self.dec(self.post_quant_conv(f_hat), self._lr_up(lr))
+
+    def to_image(self, energy, hit_logit):
+        """Hard output: zero where no hit is predicted, otherwise at least the readout threshold."""
+        hit = torch.sigmoid(hit_logit.float()) > self.hit_threshold
+        return torch.where(hit, torch.maximum(energy.float(), self.hit_level), torch.zeros_like(energy.float()))
+
+    def decode_fhat(self, f_hat, lr=None):
+        return self.to_image(*self.decode_raw(f_hat, lr))
+
+    def forward(self, x, lr=None):
         f = self.encode(x)
         f_hat, vq_loss = self.vq(f)
-        return self.decode_fhat(f_hat), vq_loss, f.detach()
+        energy, hit_logit = self.decode_raw(f_hat, lr)
+        return energy, hit_logit, vq_loss, f.detach()
+
+    @torch.no_grad()
+    def reconstruct(self, x, lr=None):
+        """HR -> tokens -> HR (hard output)."""
+        f_hat, _ = self.vq(self.encode(x))
+        return self.decode_fhat(f_hat, lr)
 
     @torch.no_grad()
     def img_to_idx(self, x):
         return self.vq.f_to_idx(self.encode(x))
 
     @torch.no_grad()
-    def idx_to_img(self, idx_list):
-        return self.decode_fhat(self.vq.idx_to_fhat(idx_list))
+    def idx_to_img(self, idx_list, lr=None):
+        return self.decode_fhat(self.vq.idx_to_fhat(idx_list), lr)

@@ -13,6 +13,11 @@ ZENODO_RECORD = "6366271"
 CALO_R_EDGES = [0.0, 4.65, 9.3, 13.95, 18.6, 27.9, 37.2, 46.5, 55.8, 65.1]
 
 BASE = {
+    # Results go to {drive_root}/{version}/{dataset}/ and every run, figure and table name starts
+    # with {dataset}__{version}, so a new model version never overwrites or mixes with an old one.
+    # v1: single-head decoder, 16x16 latent, total-energy loss.
+    # v2: hit/energy decoder heads, LR image into the decoder, 32x32 latent, per-channel energy loss.
+    "version": "v2",
     "seed": 42,
     "num_workers": 2,
     "amp": True,
@@ -55,18 +60,23 @@ DATASETS = {
             "signal_label": 1,
         },
         "vqvae": {
-            "widths": [32, 64, 128, 256],
-            "strides": [[2, 2], [2, 2], [2, 2]],   # 128 -> 16x16 latent
+            "widths": [32, 64, 128],
+            "strides": [[2, 2], [2, 2]],           # 128 -> 32x32 latent: one token per 4x4 pixels
             "n_res": 1,
             "z_ch": 32,
             "codebook_size": 1024,
             "beta": 0.25,
-            "scales": [[1, 1], [2, 2], [3, 3], [4, 4], [6, 6], [8, 8], [10, 10], [13, 13], [16, 16]],
+            "scales": [[1, 1], [2, 2], [3, 3], [4, 4], [6, 6], [8, 8], [12, 12], [16, 16], [20, 20],
+                       [24, 24], [32, 32]],        # 2530 tokens per image
             "lr": 3e-4,
             "weight_decay": 0.0,
             "batch_size": 64,
             "epochs": 30,
-            "energy_weight": 0.1,
+            "energy_weight": 0.3,                  # per-channel |log E_pred - log E_true|
+            "hit_weight": 1.0,                     # hit / no-hit cross-entropy
+            "hit_pos_weight": 1.0,                 # >1 favours predicting hits
+            "hit_threshold": 0.5,                  # a cell is "hit" when p(hit) exceeds this
+            "lr_decoder": True,                    # decoder also sees the LR image (cycled over levels)
             "dead_thresh": 0.01,
             "patience": 6,
         },
@@ -76,17 +86,19 @@ DATASETS = {
             "heads": 6,
             "mlp_ratio": 4.0,
             "drop": 0.05,
-            "lr_enc_widths": [32, 64, 128, 128],
+            "lr_enc_widths": [32, 64, 128],    # one more entry than vqvae.strides
             "lr": 3e-4,
             "weight_decay": 0.05,
             "label_smoothing": 0.0,
-            "batch_size": 64,
+            "batch_size": 32,            # 2530 tokens per image
             "epochs": 40,
             "patience": 8,
-            "temperature": 1.0,
-            "top_k": 0,
-            "decode": "sample",          # which output is "the" SR result: sample | greedy
-            "decodes": ["sample"],       # which outputs the generate stage writes
+            "temperature": 0.8,          # only used by decode "sample"
+            "top_k": 50,
+            "decode": "greedy",          # which output is "the" SR result: greedy | sample
+            # outputs the generate stage writes; any decode other than `decode` is a diagnostic
+            # and is written for the test split only
+            "decodes": ["greedy", "sample"],
             "gen_splits": ["train", "val", "test"],
             "gen_overwrite": False,      # set true after retraining, to replace cached outputs
             "gen_batch_size": 128,
@@ -143,7 +155,11 @@ DATASETS = {
             "weight_decay": 0.0,
             "batch_size": 128,
             "epochs": 30,
-            "energy_weight": 0.1,
+            "energy_weight": 0.3,
+            "hit_weight": 1.0,
+            "hit_pos_weight": 1.0,
+            "hit_threshold": 0.5,
+            "lr_decoder": True,
             "dead_thresh": 0.01,
             "patience": 6,
         },
@@ -160,10 +176,12 @@ DATASETS = {
             "batch_size": 128,
             "epochs": 40,
             "patience": 8,
-            "temperature": 1.0,
-            "top_k": 0,
-            "decode": "sample",          # which output is "the" SR result: sample | greedy
-            "decodes": ["sample"],       # which outputs the generate stage writes
+            "temperature": 0.8,          # only used by decode "sample"
+            "top_k": 50,
+            "decode": "greedy",          # which output is "the" SR result: greedy | sample
+            # outputs the generate stage writes; any decode other than `decode` is a diagnostic
+            # and is written for the test split only
+            "decodes": ["greedy", "sample"],
             "gen_splits": ["train", "val", "test"],
             "gen_overwrite": False,      # set true after retraining, to replace cached outputs
             "gen_batch_size": 256,

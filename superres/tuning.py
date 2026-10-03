@@ -1,9 +1,9 @@
 """Optuna studies (TPE sampler + median pruner), resumable across Colab sessions.
 
-study                     objective (validation set)                     direction
-{ds}__vqvae__hr           log-energy MSE + median |dE/E|                 minimise
-{ds}__var__<level>        next-scale token cross-entropy                 minimise
-{ds}__tagger__hr          qg: ROC AUC / calo: mean binned resolution     max / min
+study                       objective (validation set)                                 direction
+{ds}__{ver}__vqvae__hr      MSE + median per-channel |dE/E| + |1 - predicted/true hits|  minimise
+{ds}__{ver}__var__all       next-scale token cross-entropy                             minimise
+{ds}__{ver}__tagger__hr     qg: ROC AUC / calo: mean binned resolution                 max / min
 
 Trials use short schedules (optuna.trial_epochs) on a subset of the training
 data (optuna.trial_max_train); the best parameters are stored as dotted config

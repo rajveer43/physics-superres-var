@@ -6,9 +6,11 @@ Cache (local disk, numpy memmaps, linear energies, float32):
     {split}_hr.npy        (N, C, *hr_shape)       zero-padded ground truth
     {split}_{level}.npy   (N, C, *hr_shape / f)   sum-pooled low resolution
     {split}_target.npy    (N,)                    qg: class label, calo: E_inc [MeV]
-    {split}_sr-var_{level}.npy                    VAR output, sampled tokens (written by generate)
-    {split}_sr-greedy_{level}.npy                 VAR output, most-likely tokens
-    test_vqrec.npy                                tokenizer-only reconstruction (written by eval_sr)
+    {split}_{version}-sr-{decode}_{level}.npy     VAR output (written by generate); decode = greedy | sample
+    test_{version}-vqrec_{level}.npy              tokenizer-only reconstruction (written by eval_sr)
+
+Model outputs carry the config version, so outputs of an older model are never
+picked up by mistake; the HR / LR / target arrays are shared by all versions.
 
 Network inputs use x = log1p(E / (s_c * V)), where s_c is the mean non-zero
 cell energy of channel c and V the number of fine cells merged into one cell
@@ -31,6 +33,12 @@ from .physics_ops import project_to_lr, sum_pool, uniform_upsample
 SPLITS = ("train", "val", "test")
 IMG_KEYS = ("X_jets", "X", "x", "images", "image", "jet_images", "jets", "data", "inputs")
 LABEL_KEYS = ("y", "Y", "label", "labels", "target", "targets")
+
+
+def hit_threshold(cfg):
+    """Readout threshold in data units: a cell below it counts as empty."""
+    d = cfg["data"]
+    return d["voxel_threshold_mev"] if cfg["dataset"] == "calo" else d["occupancy_threshold"]
 
 
 def cache_dir(cfg):
@@ -375,7 +383,7 @@ class CacheStore:
     'srsample:<level>' / 'srgreedy:<level>'   the two decoding modes explicitly
     'srproj:<level>'     model output rescaled so each coarse cell matches the measurement (diagnostic)
     'uniform:<level>'    coarse energy spread evenly over the fine pixels (diagnostic)
-    'vqrec'              HR -> tokens -> HR by the tokenizer alone (diagnostic)"""
+    'vqrec:<level>'      HR -> tokens -> HR by the tokenizer alone, decoded with that level's LR (diagnostic)"""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -388,6 +396,7 @@ class CacheStore:
         self.levels = {k: tuple(v) for k, v in self.meta["levels"].items()}
         self.hr_shape = tuple(self.meta["hr_shape"])
         self.C = len(self.meta["channels"])
+        self.version = cfg.get("version", "v1")
 
     def path(self, split, what):
         return os.path.join(self.dir, f"{split}_{what}.npy")
@@ -395,16 +404,19 @@ class CacheStore:
     def _mm(self, split, what):
         return np.load(self.path(split, what), mmap_mode="r")
 
-    def sr_path(self, split, level, decode="sample"):
-        """decode: 'sample' (tokens drawn from the predicted distribution) or 'greedy' (most likely token)."""
-        return self.path(split, f"sr-var_{level}" if decode == "sample" else f"sr-{decode}_{level}")
+    def sr_path(self, split, level, decode="greedy"):
+        """decode: 'greedy' (most likely token) or 'sample' (tokens drawn from the predicted distribution)."""
+        return self.path(split, f"{self.version}-sr-{decode}_{level}")
 
-    def has_sr(self, split, level, decode="sample"):
+    def has_sr(self, split, level, decode="greedy"):
         return os.path.exists(self.sr_path(split, level, decode))
+
+    def vqrec_path(self, split, level):
+        return self.path(split, f"{self.version}-vqrec_{level}")
 
     def sr_decode(self, method):
         """Which stored SR file a method reads. 'sr' and 'srproj' follow cfg var.decode."""
-        primary = self.cfg["var"].get("decode", "sample")
+        primary = self.cfg["var"].get("decode", "greedy")
         return {"sr": primary, "srproj": primary, "srsample": "sample", "srgreedy": "greedy"}[method]
 
     def target(self, split):
@@ -426,7 +438,7 @@ class CacheStore:
         if method == "hr":
             return self._mm(split, "hr")
         if method == "vqrec":  # tokenizer-only reconstruction of HR (written by evaluate)
-            return _Lazy(lambda a: a, self._mm(split, "vqrec"))
+            return _Lazy(lambda a: a, np.load(self.vqrec_path(split, level), mmap_mode="r"))
         f = self.levels[level]
         lr = self._mm(split, level)
         if method == "lr":
@@ -442,12 +454,15 @@ class CacheStore:
 
 
 class SRDataset(Dataset):
-    """Normalised HR (and LR) pairs for VQ-VAE / VAR training."""
+    """Normalised HR (and LR) pairs for VQ-VAE / VAR training.
+    level: one level name -> item["lr"]; a list of names -> item["lr:<level>"] for each."""
 
     def __init__(self, store, split, level=None, max_n=None):
-        self.store, self.split, self.level = store, split, level
+        self.store, self.split = store, split
+        self.single = isinstance(level, str)
+        self.levels = [level] if self.single else list(level or [])
         self.n = store.meta["n"][split] if max_n is None else min(max_n, store.meta["n"][split])
-        self._hr = self._lr = None
+        self._hr, self._lr = None, {}
 
     def __len__(self):
         return self.n
@@ -455,12 +470,12 @@ class SRDataset(Dataset):
     def __getitem__(self, i):
         if self._hr is None:
             self._hr = self.store.array(self.split, "hr")
-            if self.level:
-                self._lr = self.store.array(self.split, f"lr:{self.level}")
+            self._lr = {lvl: self.store.array(self.split, f"lr:{lvl}") for lvl in self.levels}
         out = {"hr": torch.from_numpy(normalize(np.asarray(self._hr[i], np.float32), self.store.scale))}
-        if self.level:
-            vol = self.store.vol(f"lr:{self.level}")
-            out["lr"] = torch.from_numpy(normalize(np.asarray(self._lr[i], np.float32), self.store.scale, vol))
+        for lvl, arr in self._lr.items():
+            vol = self.store.vol(f"lr:{lvl}")
+            x = torch.from_numpy(normalize(np.asarray(arr[i], np.float32), self.store.scale, vol))
+            out["lr" if self.single else f"lr:{lvl}"] = x
         return out
 
 

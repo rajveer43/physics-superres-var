@@ -23,8 +23,17 @@ means 2x, 4x and 8x upscaling for jets.
    energy is exactly conserved.
 2. **Multi-scale residual VQ-VAE** (VAR paper, Algorithms 1 and 2). It works on
    `log1p(E / s_c)` images and encodes each HR image into K token maps
-   (qg: 1² … 16²; calo: 1x1x1 … 12x4x9). The codebook is shared across scales.
-   LPIPS and GAN losses are replaced by a total-energy loss.
+   (qg: 1² … 32², one token per 4×4 pixels; calo: 1x1x1 … 12x4x9). The codebook
+   is shared across scales. LPIPS and GAN losses are replaced by physics terms:
+   - the decoder has two heads per channel: **hit or not** (cross-entropy against
+     E > readout threshold) and **log-energy if hit** (MSE on hit cells only).
+     Cells without a predicted hit are exactly zero, as after detector zero
+     suppression, so the output has no diffuse background;
+   - a **per-channel energy loss**, so energy cannot move from one sub-detector
+     to another (e.g. tracks into ECAL);
+   - the decoder also sees the **LR image** (trained with every LR level in
+     turn), so layout that the measurement already fixes does not have to pass
+     through the tokens.
 3. **Conditional VAR transformer.** Next-scale prediction with a block-causal
    mask, AdaLN and L2-normalised q/k, as in the paper. The class-label start
    token is replaced by the LR measurement. An LR encoder provides the start
@@ -39,10 +48,11 @@ means 2x, 4x and 8x upscaling for jets.
    - qg: quark vs gluon classification
    - calo: incident-energy regression
 6. **Diagnostics**, kept out of the main figures and tables:
-   - `vqrec`: HR → tokens → HR by the tokenizer alone. This is the best any
-     token-predicting model could do with this tokenizer.
-   - `sr-greedy` / `sr-sample`: the two decoding modes (most likely token vs
-     sampled token).
+   - `vqrec`: HR → tokens → HR by the tokenizer alone (decoded with the same
+     LR image). This is the best any token-predicting model could do with this
+     tokenizer.
+   - `sr-sample`: tokens drawn from the predicted distribution (temperature
+     0.8, top-k 50). The main result `sr` uses the most likely token (greedy).
    - `uniform`: each coarse cell's energy spread evenly over its fine cells, a
      no-learning reference.
    - `srproj`: SR rescaled so every coarse cell matches its measured energy.
@@ -103,13 +113,13 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 | `download` | Zenodo (calo, md5-checked) or CERNBox share over WebDAV (qg); resumable `wget -c` | `/content/data/raw/<ds>/` |
 | `prepare` | Pad, clip negatives, sum-pool to every LR level, split into train/val/test, per-channel energy scale | `/content/data/cache/<ds>/*.npy`, `data_meta.json` on Drive |
 | `tune_vqvae` | Optuna: lr, codebook size, latent channels, β, energy weight, width | `optuna/<ds>__vqvae__hr*` |
-| `train_vqvae` | Full VQ-VAE training with the tuned parameters | `runs/<ds>__vqvae__hr__s42/` |
+| `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `runs/<ds>__<ver>__vqvae__hr__s42/` |
 | `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `optuna/<ds>__var__all*` |
-| `train_var` | One conditional VAR per LR level | `runs/<ds>__var__<level>__s42/` |
-| `generate` | VAR output as generated, for the splits in `var.gen_splits` and the decodings in `var.decodes` (sample, greedy) | `/content/data/cache/<ds>/*_sr-var_<level>.npy`, `*_sr-greedy_<level>.npy` |
-| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots; diagnostics in `figures/diagnostics/` | `runs/<ds>__sreval__<level>/` |
+| `train_var` | One conditional VAR per LR level | `runs/<ds>__<ver>__var__<level>__s42/` |
+| `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `/content/data/cache/<ds>/*_<ver>-sr-<decode>_<level>.npy` |
+| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `runs/<ds>__<ver>__sreval__<level>/` |
 | `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `optuna/<ds>__tagger__hr*` |
-| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `runs/<ds>__tagger__<input>__s<seed>/` |
+| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `runs/<ds>__<ver>__tagger__<input>__s<seed>/` |
 | `summarize` | Tables, plots and a markdown report across all runs | `summary/` |
 
 Every training stage resumes from `last.pt` on Drive. Optuna studies resume from
@@ -119,32 +129,38 @@ their database copy on Drive. After a disconnect, re-run the notebook from the t
 
 ```
 MyDrive/superres_results/            (…_smoke/ and …_fake/ for test runs)
-  README_layout.md
-  <dataset>/
-    data_meta.json                    shapes, splits, energy scales, label counts
-    runs/<dataset>__<stage>__<variant>__s<seed>/
-        config.json                   full config + creation time
-        history.csv                   one row per epoch
-        metrics.json                  final / test metrics
-        best.pt  last.pt              checkpoints (last.pt = resume point)
-        test_predictions.npz          taggers only
-        observables.csv  figures/     sreval only (png + pdf)
-    optuna/<dataset>__<stage>__<variant>.db | __trials.csv | __best.json
-    summary/
-        <dataset>__tagger_runs.csv    one row per tagger run
-        <dataset>__tagger_summary.csv mean and std over seeds
-        <dataset>__sr_observables.csv all observable comparisons
-        <dataset>__values__<level>.csv  mean of each quantity: HR | LR | SR | diagnostics
-        <dataset>__sr_w1_table.csv    observable x (level, method) W1 table
-        <dataset>__c2st_closure.csv   two-sample-test AUC and LR closure
-        <dataset>__report.md          all tables in one page
-        figures/                      AUC or resolution vs level, W1 heatmaps, resolution vs E
+  <version>/                          v2 = current model; v1 results stay in MyDrive/superres_results/<dataset>/
+    README_layout.md
+    <dataset>/
+      data_meta.json                  shapes, splits, energy scales, label counts
+      runs/<dataset>__<version>__<stage>__<variant>__s<seed>/
+          config.json                 full config + creation time
+          history.csv                 one row per epoch
+          metrics.json                final / test metrics
+          best.pt  last.pt            checkpoints (last.pt = resume point)
+          test_predictions.npz        taggers only
+          figures/<run>__training_curves.png|pdf     every training run, updated each epoch
+          observables.csv             sreval only
+          figures/  figures/diagnostics/            sreval only: histograms, profiles,
+                                      example events, per-channel events (png + pdf)
+      optuna/<dataset>__<version>__<stage>__<variant>.db | __trials.csv | __best.json
+      summary/
+          <dataset>__<version>__tagger_runs.csv     one row per tagger run
+          <dataset>__<version>__tagger_summary.csv  mean and std over seeds
+          <dataset>__<version>__sr_observables.csv  all observable comparisons
+          <dataset>__<version>__values__<level>.csv mean of each quantity: HR | LR | SR | diagnostics
+          <dataset>__<version>__sr_w1_table.csv     observable x (level, method) W1 table
+          <dataset>__<version>__c2st_closure.csv    two-sample-test AUC and LR closure
+          <dataset>__<version>__report.md           all tables in one page
+          figures/                    AUC or resolution vs level, W1 heatmaps, resolution vs E
 ```
 
+- `version` comes from `config.py` (`"version": "v2"`). Change it for a new model
+  variant and nothing older is overwritten; SR outputs in the local cache carry
+  it too.
 - `stage` is one of `vqvae`, `var`, `sreval` or `tagger`.
 - `variant` is the input or level, e.g. `hr`, `pool4x4`, `lr-pool4x4` or
-  `sr-pool4x4`. Runs made before the raw output became the main result are
-  named `var-…` (that was SR with the energy constraint) and are read as such.
+  `sr-pool4x4`.
 - Names contain no timestamps, so later stages can find earlier outputs. The
   creation time is stored in `config.json` instead.
 

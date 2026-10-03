@@ -4,7 +4,8 @@ Main comparison (figures/ and the report): HR truth, LR, and the super-resolved
 image exactly as the model generates it ("sr"). Nothing is corrected afterwards.
 
 Diagnostics (figures/diagnostics/ and extra table rows), to understand a result:
-    vqrec       HR -> tokens -> HR by the tokenizer alone; the ceiling for any token model
+    vqrec       HR -> tokens -> HR by the tokenizer alone (decoded with the same LR image);
+                the ceiling for any token model
     sr-greedy / sr-sample   the decoding mode that is not the primary one
     uniform     coarse energy spread evenly over the fine pixels (no-learning reference)
     srproj      sr rescaled so every coarse cell matches the measured energy
@@ -23,7 +24,7 @@ from matplotlib.colors import LogNorm  # noqa: E402
 
 from . import io_utils  # noqa: E402
 from . import metrics as M  # noqa: E402
-from .data import LEGACY_KINDS, CacheStore  # noqa: E402
+from .data import LEGACY_KINDS, CacheStore, hit_threshold  # noqa: E402
 from .observables import cell_spectrum, jet_observables, shower_observables  # noqa: E402
 from .physics_ops import sum_pool  # noqa: E402
 
@@ -33,7 +34,7 @@ STYLE = {
     "hr": dict(color="0.3", label="HR (truth)"),
     "lr": dict(color="tab:red", label="LR (input)"),
     "sr": dict(color="tab:blue", label="Super-resolved (VAR)"),
-    "vqrec": dict(color="tab:green", label="Tokenizer only (HR→tokens→HR)"),
+    "vqrec": dict(color="tab:green", label="Tokenizer only (HR→tokens→HR, with LR)"),
     "sr-greedy": dict(color="tab:purple", label="SR, most-likely tokens"),
     "sr-sample": dict(color="tab:purple", label="SR, sampled tokens"),
     "uniform": dict(color="tab:orange", label="Uniform upsample"),
@@ -57,14 +58,9 @@ def _observables(cfg, store, E, factor, e_inc):
     return shower_observables(E, factor, cfg["data"], e_inc)
 
 
-def _threshold(cfg):
-    d = cfg["data"]
-    return d["voxel_threshold_mev"] if cfg["dataset"] == "calo" else d["occupancy_threshold"]
-
-
 def _resolve_methods(cfg, store, level):
     """Which methods can be evaluated now -> (main, diagnostics)."""
-    primary = cfg["var"].get("decode", "sample")
+    primary = cfg["var"].get("decode", "greedy")
 
     def available(m):
         if m in ("lr", "uniform", "vqrec"):
@@ -187,7 +183,8 @@ def _channel_panels(cfg, rows, lr_factor, level, fig_dir, prefix, n):
     channels = cfg["data"]["channels"]
     log = cfg["eval"].get("channel_scale", "linear") == "log"
     names = [m for m in ORDER if m in rows]
-    titles = {"hr": "HR (ground truth)", "lr": "LR (input, per fine pixel)", "sr": "SR (VAR output)"}
+    titles = {"hr": "HR (ground truth)", "lr": "LR (input, per fine pixel)", "sr": "SR (VAR output)",
+              "vqrec": "Tokenizer only", "sr-sample": "SR, sampled tokens", "sr-greedy": "SR, most-likely tokens"}
     for i in range(n):
         fig, axes = plt.subplots(len(names), len(channels), figsize=(3.3 * len(channels) + 0.6, 3.3 * len(names)),
                                  squeeze=False)
@@ -223,7 +220,7 @@ def evaluate_level(cfg, level, with_c2st=True):
     store = CacheStore(cfg)
     ds, ev = cfg["dataset"], cfg["eval"]
     run = io_utils.RunDir(cfg, "sreval", level)
-    prefix = f"{ds}__{level}"
+    prefix = f"{io_utils.prefix(cfg)}__{level}"
     f = store.levels[level]
     ones = (1,) * len(store.hr_shape)
     main, diag = _resolve_methods(cfg, store, level)
@@ -236,28 +233,30 @@ def evaluate_level(cfg, level, with_c2st=True):
     hr = np.asarray(store.array("test", "hr")[:n], np.float32)
     lr_true = np.asarray(store.array("test", f"lr:{level}")[:n], np.float32)
     ref_s, ref_p = _observables(cfg, store, hr, ones, e_inc)
-    thr = _threshold(cfg)
+    thr = hit_threshold(cfg)
     ref_spec = cell_spectrum(hr, thr)
 
     def load(m):
         if m == "vqrec":
-            path = store.path("test", "vqrec")
+            path = store.vqrec_path("test", level)
             if os.path.exists(path) and len(np.load(path, mmap_mode="r")) >= n:
                 return np.asarray(np.load(path, mmap_mode="r")[:n], np.float32)
             from .train import reconstruct_with_tokenizer
             print(f"  [{level}] running the tokenizer alone on {n} HR events")
-            E = reconstruct_with_tokenizer(cfg, store, hr)
+            E = reconstruct_with_tokenizer(cfg, store, hr, lr_true, level)
             np.save(path, E.astype(np.float16 if cfg["var"].get("sr_dtype") == "float16" else np.float32))
             return E
         return np.asarray(store.array("test", f"{KIND[m]}:{level}")[:n], np.float32)
 
     rows, consistency, obs, profs = [], {}, {}, {}
     n_ex = min(ev["n_examples"], n)
-    imgs = {"hr": hr[:n_ex]}
+    imgs, diag_imgs = {"hr": hr[:n_ex]}, {}
     for m in main + diag:
         E = load(m)
         if m in main:
             imgs[m] = E[:n_ex]
+        elif m in ("vqrec", "sr-sample", "sr-greedy"):
+            diag_imgs[m] = E[:n_ex]
         s, p = _observables(cfg, store, E, f if m == "lr" else ones, e_inc)
         obs[m], profs[m] = s, p
         role = "main" if m in main else "diagnostic"
@@ -300,8 +299,12 @@ def evaluate_level(cfg, level, with_c2st=True):
         _profiles(ref_p, profs, diag_dir, prefix)
     imgs["lr"] = lr_true[:n_ex]
     _examples(cfg, imgs, f, run.fig_dir, prefix, n_ex)
+    if diag_imgs:
+        _examples(cfg, {**imgs, **diag_imgs}, f, diag_dir, prefix, n_ex)
     if ds == "qg":
         _channel_panels(cfg, imgs, f, level, run.fig_dir, prefix, n_ex)
+        if diag_imgs:  # same events with the tokenizer-only and other-decoding rows added
+            _channel_panels(cfg, {**imgs, **diag_imgs}, f, level, diag_dir, prefix, n_ex)
     print(f"[{run.name}] {n} events; main: {main}; diagnostics: {diag}; figures in {run.fig_dir}")
     return df
 
@@ -310,7 +313,7 @@ def evaluate_level(cfg, level, with_c2st=True):
 def _load_metrics(cfg, stage):
     root = os.path.join(io_utils.dataset_root(cfg), "runs")
     out = []
-    for path in sorted(glob.glob(os.path.join(root, f"{cfg['dataset']}__{stage}__*", "metrics.json"))):
+    for path in sorted(glob.glob(os.path.join(root, f"{io_utils.prefix(cfg)}__{stage}__*", "metrics.json"))):
         out.append((os.path.basename(os.path.dirname(path)), io_utils.load_json(path)))
     return out
 
@@ -339,7 +342,7 @@ def values_table(obs, level):
 
 
 def summarize(cfg):
-    ds = cfg["dataset"]
+    ds, pfx = cfg["dataset"], io_utils.prefix(cfg)
     sdir, fdir = io_utils.summary_dir(cfg), io_utils.summary_dir(cfg, "figures")
     levels = list(cfg["data"]["levels"])
     sections = []
@@ -356,37 +359,37 @@ def summarize(cfg):
         rows.append(row)
     if rows:
         tag = pd.DataFrame(rows)
-        tag.to_csv(os.path.join(sdir, f"{ds}__tagger_runs.csv"), index=False)
+        tag.to_csv(os.path.join(sdir, f"{pfx}__tagger_runs.csv"), index=False)
         key = "auc" if ds == "qg" else "mean_binned_resolution"
         num = [c for c in tag.columns if tag[c].dtype.kind in "fi" and c not in ("seed", "n_train")]
         agg = tag.groupby(["method", "level"])[num].agg(["mean", "std"])
         agg.columns = [f"{a} ({'mean' if b == 'mean' else 'spread over seeds'})" for a, b in agg.columns]
         agg.insert(0, "n seeds", tag.groupby(["method", "level"])["seed"].nunique())
         agg = agg.reset_index()
-        agg.to_csv(os.path.join(sdir, f"{ds}__tagger_summary.csv"), index=False)
+        agg.to_csv(os.path.join(sdir, f"{pfx}__tagger_summary.csv"), index=False)
         sections.append(("Downstream tagger / regressor on the test set. 'boot_err' is the uncertainty from "
                          "resampling the test set; 'spread over seeds' needs at least two seeds.", agg))
-        _plot_tagger(tag, key, levels, fdir, ds)
+        _plot_tagger(tag, key, levels, fdir, ds, pfx)
         if ds == "calo":
-            _plot_calo_resolution(cfg, fdir)
+            _plot_calo_resolution(cfg, fdir, pfx)
 
     # SR observables
     frames = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(
-        io_utils.dataset_root(cfg), "runs", f"{ds}__sreval__*", "observables.csv")))]
+        io_utils.dataset_root(cfg), "runs", f"{pfx}__sreval__*", "observables.csv")))]
     if frames:
         obs = pd.concat(frames, ignore_index=True)
         obs["method"] = obs["method"].replace({"var": "srproj", "var-raw": "sr"})  # older runs
-        obs.to_csv(os.path.join(sdir, f"{ds}__sr_observables.csv"), index=False)
+        obs.to_csv(os.path.join(sdir, f"{pfx}__sr_observables.csv"), index=False)
         for level in levels:
             t = values_table(obs, level)
             if t is not None:
-                t.to_csv(os.path.join(sdir, f"{ds}__values__{level}.csv"))
+                t.to_csv(os.path.join(sdir, f"{pfx}__values__{level}.csv"))
                 sections.append((f"{level}: mean of each quantity for the truth, the coarse input and the "
                                  "super-resolved output (other columns are diagnostics)", t))
         piv = obs.pivot_table(index="observable", columns=["level", "method"], values="w1_over_sigma")
-        piv.to_csv(os.path.join(sdir, f"{ds}__sr_w1_table.csv"))
+        piv.to_csv(os.path.join(sdir, f"{pfx}__sr_w1_table.csv"))
         sections.append(("Distance to the HR distribution, W1 / sigma_HR (0 = identical)", piv))
-        _plot_w1(obs, levels, fdir, ds)
+        _plot_w1(obs, levels, fdir, ds, pfx)
 
     # C2ST + closure
     rows = []
@@ -398,14 +401,14 @@ def summarize(cfg):
             rows.append({"level": m["level"], "method": LEGACY_KINDS.get(meth.replace("-", ""), meth), **r})
     if rows:
         c = pd.DataFrame(rows).groupby(["level", "method"]).first().reset_index()
-        c.to_csv(os.path.join(sdir, f"{ds}__c2st_closure.csv"), index=False)
+        c.to_csv(os.path.join(sdir, f"{pfx}__c2st_closure.csv"), index=False)
         sections.append(("Two-sample test AUC (0.5 = a CNN cannot tell it from HR) and LR closure "
                          "(sum|pool(SR) - LR| / sum LR; 0 = agrees with the coarse measurement)", c))
     _write_report(cfg, sections, sdir)
     return dict(sections)
 
 
-def _plot_tagger(tag, key, levels, fdir, ds):
+def _plot_tagger(tag, key, levels, fdir, ds, pfx):
     fig, ax = plt.subplots(figsize=(5.5, 3.8))
     hr = tag[tag["method"] == "hr"][key]
     if len(hr):
@@ -422,11 +425,11 @@ def _plot_tagger(tag, key, levels, fdir, ds):
     ax.set_xlabel("down-sampling level")
     ax.set_ylabel("tagger ROC AUC" if ds == "qg" else "energy resolution (mean over bins)")
     ax.legend(fontsize=8, frameon=False)
-    io_utils.save_figure(fig, fdir, f"{ds}__tagger_{key}_vs_level")
+    io_utils.save_figure(fig, fdir, f"{pfx}__tagger_{key}_vs_level")
     plt.close(fig)
 
 
-def _plot_calo_resolution(cfg, fdir):
+def _plot_calo_resolution(cfg, fdir, pfx):
     levels = list(cfg["data"]["levels"])
     fig, axes = plt.subplots(1, len(levels), figsize=(4.5 * len(levels), 3.6), squeeze=False)
     runs = [m for _, m in _load_metrics(cfg, "tagger")]
@@ -445,11 +448,11 @@ def _plot_calo_resolution(cfg, fdir):
         ax.set_xlabel("E_inc [GeV]")
         ax.set_ylabel("sigma_eff(E_pred/E_inc)")
     axes[0, 0].legend(fontsize=7, frameon=False)
-    io_utils.save_figure(fig, fdir, "calo__energy_resolution_vs_E")
+    io_utils.save_figure(fig, fdir, f"{pfx}__energy_resolution_vs_E")
     plt.close(fig)
 
 
-def _plot_w1(obs, levels, fdir, ds):
+def _plot_w1(obs, levels, fdir, ds, pfx):
     for level in levels:
         s = obs[obs["level"] == level].pivot_table(index="observable", columns="method", values="w1_over_sigma")
         if s.empty:
@@ -468,7 +471,7 @@ def _plot_w1(obs, levels, fdir, ds):
                         color="w" if v > 1 else "k")
         fig.colorbar(im, ax=ax, label="log10(W1 / sigma_HR), lower is better")
         ax.set_title(f"{ds} {level}: distance to the HR distribution", fontsize=9)
-        io_utils.save_figure(fig, fdir, f"{ds}__w1_heatmap__{level}")
+        io_utils.save_figure(fig, fdir, f"{pfx}__w1_heatmap__{level}")
         plt.close(fig)
 
 
@@ -481,11 +484,11 @@ def _md(df):
 
 
 def _write_report(cfg, sections, sdir):
-    ds = cfg["dataset"]
-    lines = [f"# {ds} super-resolution summary", "", f"generated {io_utils.now()}", "",
+    ds, pfx = cfg["dataset"], io_utils.prefix(cfg)
+    lines = [f"# {ds} super-resolution summary ({cfg.get('version', 'v1')})", "", f"generated {io_utils.now()}", "",
              "SR means the model output exactly as generated. Columns such as 'Uniform upsample', "
              "'SR + energy constraint' and 'Tokenizer only' are diagnostics.", ""]
     for title, t in sections:
         lines += [f"## {title}", "", _md(t), ""]
-    with open(os.path.join(sdir, f"{ds}__report.md"), "w") as f:
+    with open(os.path.join(sdir, f"{pfx}__report.md"), "w") as f:
         f.write("\n".join(lines))

@@ -153,7 +153,8 @@ class ConditionalVAR(nn.Module):
 
     @torch.no_grad()
     def generate(self, lr, vqvae, temperature=1.0, top_k=0, greedy=False, generator=None):
-        """Coarse-to-fine sampling; returns decoder output in log-energy space."""
+        """Coarse-to-fine token prediction; the tokenizer decodes them together with the LR image.
+        Returns the hard output in normalised log-energy space (exact zeros where no hit)."""
         c, sp = self.condition(lr)
         B = lr.shape[0]
         f_hat = torch.zeros(B, self.Cvae, *self.scales[-1], device=lr.device)
@@ -166,4 +167,4 @@ class ConditionalVAR(nn.Module):
             f_hat, nxt = vqvae.vq.next_input(k, f_hat, idx)
             if nxt is not None:
                 inputs.append(nxt)
-        return vqvae.decode_fhat(f_hat)
+        return vqvae.decode_fhat(f_hat, lr)

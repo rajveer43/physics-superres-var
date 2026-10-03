@@ -10,7 +10,7 @@ from numpy.lib.format import open_memmap
 from torch.utils.data import DataLoader
 
 from . import metrics as M
-from .data import CacheStore, SRDataset, TaggerDataset, target_transform
+from .data import CacheStore, SRDataset, TaggerDataset, hit_threshold, normalize, target_transform
 from .io_utils import RunDir
 from .models import VQVAE, ConditionalVAR, Tagger
 
@@ -127,35 +127,92 @@ def _save(run, name, model, opt, epoch, stopper, extra):
 
 
 # ------------------------------------------------------------------ VQ-VAE
-def build_vqvae(store, vq_cfg, circ):
-    return VQVAE(len(store.hr_shape), store.C, vq_cfg, circ)
+VQVAE_CURVES = [("loss", ["train_loss", "train_rec", "train_hit", "train_energy", "train_vq"]),
+                ("validation", ["val_rec_mse", "val_channel_energy_err_median", "objective"]),
+                ("hits", ["val_hit_precision", "val_hit_recall", "val_hit_count_ratio"]),
+                ("codebook", ["codebook_usage"])]
+VAR_CURVES = [("cross-entropy", ["train_ce", "val_ce"]),
+              ("token accuracy", ["val_token_acc", "val_token_acc_last_scale"])]
+TAGGER_CURVES = [("loss", ["train_loss"]),
+                 ("validation", ["val_auc", "val_mean_binned_resolution", "val_mean_binned_bias"])]
+
+
+def hit_levels(cfg, store):
+    """Readout threshold per channel in normalised units: log1p(thr / s_c)."""
+    return np.log1p(hit_threshold(cfg) / store.scale).astype(np.float32)
+
+
+def build_vqvae(cfg, store, vq_cfg):
+    return VQVAE(len(store.hr_shape), store.C, vq_cfg, store.hr_shape, hit_levels(cfg, store),
+                 cfg["data"]["circular_dims"])
 
 
 def load_vqvae(cfg, store, dev):
     run = RunDir(cfg, "vqvae", "hr", cfg["seed"])
     ck = torch.load(run.file("best.pt"), map_location="cpu", weights_only=False)
-    model = build_vqvae(store, ck["vq_cfg"], cfg["data"]["circular_dims"])
+    model = build_vqvae(cfg, store, ck["vq_cfg"])
     model.load_state_dict(ck["model"])
     return model.to(dev).eval().requires_grad_(False), ck["vq_cfg"]
 
 
+def _lr_levels(cfg):
+    return list(cfg["data"]["levels"]) if cfg["vqvae"].get("lr_decoder", True) else []
+
+
+def _batch_lr(b, levels, i, dev):
+    """The tokenizer decoder is trained with every LR level, one level per batch in turn."""
+    if not levels:
+        return None
+    return b[f"lr:{levels[i % len(levels)]}"].to(dev, non_blocking=True)
+
+
+def vqvae_losses(model, x, lr, s, vc, amp):
+    """Tokenizer losses on normalised images x (B, C, *grid).
+    rec    : log-energy MSE on the cells that are hit in the truth
+    hit    : hit / no-hit cross-entropy against E > readout threshold
+    energy : per-channel |log E_pred - log E_true|, with E_pred = sum p(hit) * energy (differentiable)"""
+    with amp.ctx():
+        energy, hit_logit, vq_loss, f = model(x, lr)
+    energy, hit_logit = energy.float(), hit_logit.float()
+    hit = (x > model.hit_level).float()
+    rec = ((energy - x) ** 2 * hit).sum() / hit.sum().clamp_min(1.0)
+    pos_w = torch.tensor(float(vc.get("hit_pos_weight", 1.0)), device=x.device)
+    hit_loss = F.binary_cross_entropy_with_logits(hit_logit, hit, pos_weight=pos_w)
+    dims = tuple(range(2, x.dim()))
+    e_true = to_energy(x, s).sum(dims)
+    e_pred = (to_energy(energy, s) * torch.sigmoid(hit_logit)).sum(dims)
+    eps = 1e-3 * s.flatten()[None]
+    e_loss = (torch.log(e_pred + eps) - torch.log(e_true + eps)).abs().mean()
+    loss = (rec + vc.get("hit_weight", 1.0) * hit_loss + vc["energy_weight"] * e_loss + vq_loss.float())
+    parts = {"rec": rec.item(), "hit": hit_loss.item(), "energy": e_loss.item(), "vq": vq_loss.item()}
+    return loss, parts, f
+
+
 @torch.no_grad()
-def _eval_vqvae(model, dl, s, dev, amp, thresh):
+def _eval_vqvae(model, dl, s, dev, amp, thresh, levels):
+    """Metrics on the hard output (what VAR will produce): MSE over all cells, per-channel energy
+    error, and how well hit cells are found (precision, recall, predicted / true hit count)."""
     model.eval()
-    mse, eerr, n = 0.0, [], 0
-    for b in dl:
+    mse, eerr, n, tp, n_pred, n_true = 0.0, [], 0, 0.0, 0.0, 0.0
+    for i, b in enumerate(dl):
         x = b["hr"].to(dev, non_blocking=True)
         with amp.ctx():
-            rec, _, _ = model(x)
-        rec = rec.float().clamp_min(0)
+            energy, hit_logit, _, _ = model(x, _batch_lr(b, levels, i, dev))
+        rec = model.to_image(energy, hit_logit)
         mse += F.mse_loss(rec, x, reduction="sum").item() / x[0].numel()
-        dims = tuple(range(1, x.dim()))
+        dims = tuple(range(2, x.dim()))
         et, ep = to_energy(x, s).sum(dims), to_energy(rec, s).sum(dims)
-        eerr.append(((ep - et).abs() / et.clamp_min(1e-9)).cpu())
+        eerr.append(((ep - et).abs() / et.clamp_min(1e-9)).flatten().cpu())
+        p, t = rec > 0, x > model.hit_level
+        tp += (p & t).sum().item()
+        n_pred += p.sum().item()
+        n_true += t.sum().item()
         n += len(x)
     eerr = torch.cat(eerr).numpy()
-    return {"val_rec_mse": mse / n, "val_energy_err_median": float(np.median(eerr)),
-            "val_energy_err_mean": float(np.mean(np.clip(eerr, 0, 10))),
+    return {"val_rec_mse": mse / n, "val_channel_energy_err_median": float(np.median(eerr)),
+            "val_channel_energy_err_mean": float(np.mean(np.clip(eerr, 0, 10))),
+            "val_hit_precision": tp / max(n_pred, 1.0), "val_hit_recall": tp / max(n_true, 1.0),
+            "val_hit_count_ratio": n_pred / max(n_true, 1.0),
             "codebook_usage": float((model.vq.usage > thresh).float().mean())}
 
 
@@ -164,11 +221,12 @@ def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=
     dev, amp, store = device(), Amp(cfg), CacheStore(cfg)
     vc = cfg["vqvae"]
     epochs = epochs or vc["epochs"]
-    tr = SRDataset(store, "train", max_n=max_train)
-    va = SRDataset(store, "val", max_n=None if max_train is None else max(256, max_train // 8))
+    levels = _lr_levels(cfg)
+    tr = SRDataset(store, "train", levels, max_n=max_train)
+    va = SRDataset(store, "val", levels, max_n=None if max_train is None else max(256, max_train // 8))
     dl_tr = loader(tr, vc["batch_size"], True, cfg, drop_last=True)
     dl_va = loader(va, vc["batch_size"], False, cfg)
-    model = build_vqvae(store, vc, cfg["data"]["circular_dims"]).to(dev)
+    model = build_vqvae(cfg, store, vc).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=vc["lr"], betas=(0.9, 0.95), weight_decay=vc["weight_decay"])
     s = scale_tensor(store, dev)
     run = RunDir(cfg, "vqvae", "hr", cfg["seed"]) if save else None
@@ -192,31 +250,31 @@ def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=
             break
         model.train()
         t0, run_loss, f_last = time.time(), 0.0, None
+        parts_sum = {}
         for b in dl_tr:
             lr = set_lr(opt, step, total, vc["lr"], warm)
             x = b["hr"].to(dev, non_blocking=True)
-            with amp.ctx():
-                rec, vq_loss, f_last = model(x)
-            rec = rec.float()
-            dims = tuple(range(1, x.dim()))
-            e_true = to_energy(x, s).sum(dims)
-            e_pred = to_energy(rec.clamp(max=30), s).sum(dims)
-            e_loss = (torch.log(e_pred + 1e-3) - torch.log(e_true + 1e-3)).abs().mean()
-            loss = F.mse_loss(rec, x) + vq_loss.float() + vc["energy_weight"] * e_loss
+            loss, parts, f_last = vqvae_losses(model, x, _batch_lr(b, levels, step, dev), s, vc, amp)
             amp.step(loss, opt, model.parameters())
             run_loss += loss.item()
+            for k, v in parts.items():
+                parts_sum[k] = parts_sum.get(k, 0.0) + v
             step += 1
         used = float((model.vq.usage > vc["dead_thresh"]).float().mean())  # before the reset below
         dead = model.vq.reinit_dead(f_last, vc["dead_thresh"])
-        val = _eval_vqvae(model, dl_va, s, dev, amp, vc["dead_thresh"])
+        val = _eval_vqvae(model, dl_va, s, dev, amp, vc["dead_thresh"], levels)
         val["codebook_usage"] = used
-        objective = val["val_rec_mse"] + val["val_energy_err_median"]
+        # hard-output MSE + per-channel energy error + missed / invented hits
+        objective = (val["val_rec_mse"] + val["val_channel_energy_err_median"]
+                     + abs(1.0 - val["val_hit_count_ratio"]))
         improved = stopper.update(objective)
-        row = {"epoch": epoch, "lr": lr, "train_loss": run_loss / len(dl_tr), **val,
+        row = {"epoch": epoch, "lr": lr, "train_loss": run_loss / len(dl_tr),
+               **{f"train_{k}": v / len(dl_tr) for k, v in parts_sum.items()}, **val,
                "objective": objective, "dead_codes_reset": dead, "sec": round(time.time() - t0, 1)}
         print({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()})
         if run is not None:
             run.log(row)
+            run.plot_history(VQVAE_CURVES)
             extra = {"vq_cfg": vc}
             if improved:
                 _save(run, "best.pt", model, None, epoch, None, extra)
@@ -320,6 +378,7 @@ def train_var(cfg, level, trial=None, epochs=None, max_train=None, save=True, re
         print({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()})
         if run is not None:
             run.log(row)
+            run.plot_history(VAR_CURVES)
             extra = {"vq_cfg": vq_cfg, "var_cfg": vc, "level": level}
             if improved:
                 _save(run, "best.pt", model, None, epoch, None, extra)
@@ -337,19 +396,21 @@ def train_var(cfg, level, trial=None, epochs=None, max_train=None, save=True, re
 def generate_sr(cfg, level, splits=None, decodes=None):
     """Run VAR on LR events and cache the output exactly as generated (no energy correction).
 
-    decodes: 'sample' draws each token from the predicted distribution (var.temperature, var.top_k);
-             'greedy' always takes the most likely token."""
+    decodes: 'greedy' always takes the most likely token; 'sample' draws each token from the
+             predicted distribution (var.temperature, var.top_k). The primary decode (var.decode)
+             is written for every split in var.gen_splits, the others for the test split only."""
     dev, amp, store = device(), Amp(cfg), CacheStore(cfg)
     vc = cfg["var"]
+    primary = vc.get("decode", "greedy")
     splits = splits or vc.get("gen_splits") or ("train", "val", "test")
-    decodes = decodes or vc.get("decodes") or [vc.get("decode", "sample")]
+    decodes = decodes or vc.get("decodes") or [primary]
     vq, _ = load_vqvae(cfg, store, dev)
     model = load_var(cfg, store, level, dev)
     s = scale_tensor(store, dev)
     dtype = np.float16 if vc.get("sr_dtype", "float32") == "float16" else np.float32
     for decode in decodes:
         gen = torch.Generator(device=dev).manual_seed(cfg["seed"])
-        for split in splits:
+        for split in (splits if decode == primary else [x for x in splits if x == "test"]):
             n = store.meta["n"][split]
             if vc["gen_max_per_split"]:
                 n = min(n, vc["gen_max_per_split"])
@@ -377,18 +438,20 @@ def generate_sr(cfg, level, splits=None, decodes=None):
 
 
 @torch.no_grad()
-def reconstruct_with_tokenizer(cfg, store, hr, batch_size=64):
-    """HR -> tokens -> HR with the tokenizer alone (no transformer). hr: linear energies (n, C, *grid).
-    This is the best any token-predicting model could do with this tokenizer."""
-    from .data import normalize
+def reconstruct_with_tokenizer(cfg, store, hr, lr, level, batch_size=64):
+    """HR -> tokens -> HR with the tokenizer alone (no transformer), decoded with the LR image of
+    `level`. hr, lr: linear energies. This is the best any token-predicting model could do."""
     dev, amp = device(), Amp(cfg)
     vq, _ = load_vqvae(cfg, store, dev)
     s = scale_tensor(store, dev)
+    vol = store.vol(f"lr:{level}")
     out = np.empty(hr.shape, dtype=np.float32)
     for i in range(0, len(hr), batch_size):
         x = torch.from_numpy(normalize(np.asarray(hr[i:i + batch_size], np.float32), store.scale, batch=True)).to(dev)
+        lo = torch.from_numpy(normalize(np.asarray(lr[i:i + batch_size], np.float32), store.scale, vol,
+                                        batch=True)).to(dev)
         with amp.ctx():
-            rec, _, _ = vq(x)
+            rec = vq.reconstruct(x, lo if vq.use_lr else None)
         out[i:i + len(x)] = to_energy(rec.float(), s).cpu().numpy()
     return out
 
@@ -506,6 +569,7 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
         print({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()})
         if run is not None:
             run.log(row)
+            run.plot_history(TAGGER_CURVES)
         _maybe_prune(trial, objective, epoch)
         if stopper.stop:
             break
