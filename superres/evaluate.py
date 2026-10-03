@@ -179,6 +179,45 @@ def _examples(cfg, images, lr_factor, fig_dir, prefix, n):
     plt.close(fig)
 
 
+def _channel_panels(cfg, rows, lr_factor, level, fig_dir, prefix, n):
+    """One figure per event: rows = HR / LR / SR (and any other method passed), columns = channels.
+    A column shares one colour scale (each channel has its own energy range). LR is shown on the
+    fine grid as energy per fine pixel, i.e. each coarse cell's energy spread over the pixels it covers."""
+    from .physics_ops import uniform_upsample
+    channels = cfg["data"]["channels"]
+    log = cfg["eval"].get("channel_scale", "linear") == "log"
+    names = [m for m in ORDER if m in rows]
+    titles = {"hr": "HR (ground truth)", "lr": "LR (input, per fine pixel)", "sr": "SR (VAR output)"}
+    for i in range(n):
+        fig, axes = plt.subplots(len(names), len(channels), figsize=(3.3 * len(channels) + 0.6, 3.3 * len(names)),
+                                 squeeze=False)
+        for c, ch in enumerate(channels):
+            vmax = max(float(rows["hr"][i, c].max()), 1e-6)
+            norm = LogNorm(vmax * 1e-3, vmax) if log else plt.Normalize(0, vmax)
+            for r, m in enumerate(names):
+                img = rows[m][i:i + 1]
+                if m == "lr":
+                    img = uniform_upsample(img, lr_factor)
+                img = img[0, c]
+                ax = axes[r, c]
+                im = ax.imshow(np.clip(img, vmax * 1e-3, None) if log else img, norm=norm, cmap="inferno",
+                               origin="lower", interpolation="nearest")
+                ax.set_xticks([])
+                ax.set_yticks([])
+                if r == 0:
+                    ax.set_title(ch.upper() if ch != "tracks" else "Tracks", fontsize=13, fontweight="bold")
+                if c == 0:
+                    ax.set_ylabel(titles.get(m, _style(m)["label"]), fontsize=11)
+            fig.colorbar(im, ax=list(axes[:, c]), fraction=0.04, pad=0.02, location="bottom").set_label(
+                f"{ch} energy per pixel", fontsize=8)
+        f = "×".join(str(v) for v in lr_factor)
+        fig.suptitle(f"Per-channel jet image, {level} ({f} pixels merged into one, then super-resolved)\n"
+                     f"test event {i}; each column shares one colour scale ({'log' if log else 'linear'})",
+                     fontsize=11)
+        io_utils.save_figure(fig, fig_dir, f"{prefix}__channels__event{i}")
+        plt.close(fig)
+
+
 # --------------------------------------------------------------- evaluation
 def evaluate_level(cfg, level, with_c2st=True):
     store = CacheStore(cfg)
@@ -261,6 +300,8 @@ def evaluate_level(cfg, level, with_c2st=True):
         _profiles(ref_p, profs, diag_dir, prefix)
     imgs["lr"] = lr_true[:n_ex]
     _examples(cfg, imgs, f, run.fig_dir, prefix, n_ex)
+    if ds == "qg":
+        _channel_panels(cfg, imgs, f, level, run.fig_dir, prefix, n_ex)
     print(f"[{run.name}] {n} events; main: {main}; diagnostics: {diag}; figures in {run.fig_dir}")
     return df
 

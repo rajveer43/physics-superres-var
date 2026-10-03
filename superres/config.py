@@ -107,6 +107,7 @@ DATASETS = {
         },
         "eval": {"max_events": 4000, "c2st_max": 4000, "c2st_epochs": 5, "nsub_max": 2000,
                  "hist_bins": 40, "n_examples": 4,
+                 "channel_scale": "linear",   # per-channel event figures: linear | log
                  # main figures and tables: truth vs coarse vs model output as generated
                  "methods": ["lr", "sr"],
                  # extra rows / figures kept apart under figures/diagnostics
