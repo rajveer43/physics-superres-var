@@ -63,6 +63,19 @@ def response_metrics(e_true, e_pred, n_bins=8):
     return out
 
 
+def paired_metrics(ref, other):
+    """Event by event (SR and HR are the same events): bias = mean(other - ref) / mean(ref),
+    resolution = std(other - ref) / mean(ref), and the Pearson correlation."""
+    ref = np.asarray(ref, dtype=np.float64)
+    other = np.asarray(other, dtype=np.float64)
+    ok = np.isfinite(ref) & np.isfinite(other)
+    a, b = ref[ok], other[ok]
+    scale = abs(a.mean()) + 1e-12
+    r = float(np.corrcoef(a, b)[0, 1]) if a.std() > 0 and b.std() > 0 else float("nan")
+    return {"mean_ref": float(a.mean()), "mean_pred": float(b.mean()), "bias": float((b - a).mean() / scale),
+            "resolution": float((b - a).std() / scale), "pearson_r": r}
+
+
 def compare_distributions(ref, other, relative=False):
     """ref/other: per-event observable values for the same events."""
     ref = np.asarray(ref, dtype=np.float64)

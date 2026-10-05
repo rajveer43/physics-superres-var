@@ -5,8 +5,12 @@ factor f of that grid, so HR, LR and SR images are measured with the same code
 and the same physical cell coordinates.
 
 Jets (qg), treating each pixel as a massless constituent with pT = pixel value:
-    sum_<channel>, sum_all, jet_pt, jet_mass, girth, ptD, n_hits, tau21 (N-subjettiness)
+    sum_<channel>, sum_all, jet_pt, jet_mass, girth (pT-weighted mean dR), dR_std (pT-weighted
+    spread of dR around the girth), ptD, n_hits (cells of the channel sum), n_hits_<channel>,
+    tau21 (N-subjettiness)
     radial_profile: fraction of pT in annuli of dR around the jet centroid
+n_hits* and ptD depend on the cell size, so on an LR grid they are not comparable with HR
+(GRID_DEPENDENT).
 Showers (calo):
     e_total, e_ratio = E_dep / E_inc, depth_centroid/width (layers),
     r_centroid/width (mm), x/y_centroid (mm), frac_early/mid/late, n_hits
@@ -15,10 +19,17 @@ Showers (calo):
 import numpy as np
 
 JET_RADIAL_EDGES = np.linspace(0.0, 0.8, 9)
+GRID_DEPENDENT = ("n_hits", "ptD")  # prefixes of observables that change with the cell size
 
 
 def _centres(n, f, offset=0.0):
     return (np.arange(n) + 0.5) * f - 0.5 - offset
+
+
+def is_hit(E, thr):
+    """Cell above the readout threshold. The decoder writes hit cells at no less than the threshold
+    and the log/exp round trip can land a few ulp below it, so compare with a small tolerance."""
+    return E > thr * (1 - 1e-4)
 
 
 # ---------------------------------------------------------------------- jets
@@ -46,7 +57,7 @@ def jet_observables(E, f, dcfg, nsub_max=0, chunk=500):
     phi = _centres(W, f[1], c0) * pix
     ETA, PHI = np.meshgrid(eta, phi, indexing="ij")
     out = {f"sum_{ch}": E[:, i].reshape(N, -1).sum(1).astype(np.float64) for i, ch in enumerate(dcfg["channels"])}
-    keys = ("sum_all", "jet_pt", "jet_mass", "girth", "ptD", "n_hits")
+    keys = ("sum_all", "jet_pt", "jet_mass", "girth", "dR_std", "ptD", "n_hits")
     for k in keys:
         out[k] = np.zeros(N)
     prof = np.zeros((N, len(JET_RADIAL_EDGES) - 1))
@@ -63,19 +74,24 @@ def jet_observables(E, f, dcfg, nsub_max=0, chunk=500):
         out["sum_all"][sl] = tot
         out["jet_pt"][sl] = np.hypot(px, py)
         out["jet_mass"][sl] = np.sqrt(np.clip(e ** 2 - px ** 2 - py ** 2 - pz ** 2, 0, None))
-        out["girth"][sl] = (P * dR).sum((1, 2)) / safe
+        g = (P * dR).sum((1, 2)) / safe
+        out["girth"][sl] = g
+        out["dR_std"][sl] = np.sqrt(np.clip((P * dR ** 2).sum((1, 2)) / safe - g ** 2, 0, None))
         out["ptD"][sl] = np.sqrt((P ** 2).sum((1, 2))) / safe
-        out["n_hits"][sl] = (P > thr).sum((1, 2))
+        out["n_hits"][sl] = is_hit(P, thr).sum((1, 2))
         b = np.digitize(dR, JET_RADIAL_EDGES) - 1
         for k in range(prof.shape[1]):
             prof[sl, k] = np.where(b == k, P, 0).sum((1, 2)) / safe
+    for i, ch in enumerate(dcfg["channels"]):  # a missing channel is invisible in the summed count
+        out[f"n_hits_{ch}"] = np.concatenate([is_hit(E[s:s + chunk, i], thr).reshape(-1, H * W).sum(1)
+                                              for s in range(0, N, chunk)]).astype(np.float64)
     if nsub_max:
         n = min(N, nsub_max)
         t1, t2 = np.zeros(n), np.zeros(n)
         R0 = 0.4
         for i in range(n):
             P = E[i].sum(0)
-            m = P > thr
+            m = is_hit(P, thr)
             w = P[m]
             if len(w) > 100:
                 keep = np.argsort(-w)[:100]
