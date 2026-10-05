@@ -119,6 +119,7 @@ DATASETS = {
             "patience": 5,
             "max_train": None,
             "seeds": [42],
+            "retrain": False,            # True: retrain taggers that already finished
         },
         "eval": {"max_events": 4000, "c2st_max": 4000, "c2st_epochs": 5, "nsub_max": 2000,
                  "hist_bins": 40, "n_examples": 4,
@@ -202,6 +203,7 @@ DATASETS = {
             "patience": 5,
             "max_train": None,
             "seeds": [42],
+            "retrain": False,            # True: retrain taggers that already finished
         },
         "eval": {"max_events": 10000, "c2st_max": 10000, "c2st_epochs": 5, "hist_bins": 40,
                  "n_examples": 3, "methods": ["lr", "sr"],

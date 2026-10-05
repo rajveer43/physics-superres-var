@@ -59,7 +59,7 @@ def main():
     paths = {"paths.drive_root": os.path.join(a.root, "results"), "paths.raw_root": os.path.join(a.root, "raw"),
              "paths.cache_root": os.path.join(a.root, "cache"), "num_workers": 0}
     stages = ["prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_var", "generate", "eval_sr",
-              "tune_tagger", "train_taggers", "summarize"]
+              "tune_tagger", "train_taggers", "tagger_xeval", "summarize"]
     for ds in (["qg", "calo"] if a.dataset == "both" else [a.dataset]):
         raw = os.path.join(a.root, "raw", ds)
         if not os.listdir(raw) if os.path.isdir(raw) else True:

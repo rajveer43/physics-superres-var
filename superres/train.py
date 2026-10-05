@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from . import metrics as M
 from .data import CacheStore, SRDataset, TaggerDataset, hit_threshold, normalize, target_transform
-from .io_utils import RunDir
+from .io_utils import RunDir, load_json
 from .models import VQVAE, ConditionalVAR, Tagger
 
 
@@ -133,8 +133,9 @@ VQVAE_CURVES = [("loss", ["train_loss", "train_rec", "train_hit", "train_energy"
                 ("codebook", ["codebook_usage"])]
 VAR_CURVES = [("cross-entropy", ["train_ce", "val_ce"]),
               ("token accuracy", ["val_token_acc", "val_token_acc_last_scale"])]
-TAGGER_CURVES = [("loss", ["train_loss"]),
-                 ("validation", ["val_auc", "val_mean_binned_resolution", "val_mean_binned_bias"])]
+TAGGER_CURVES = [("loss", ["train_loss", "val_loss"]),
+                 ("accuracy / AUC", ["train_accuracy", "val_accuracy", "val_auc"]),
+                 ("validation", ["val_mean_binned_resolution", "val_mean_binned_bias"])]
 
 
 def hit_levels(cfg, store):
@@ -515,9 +516,18 @@ def fit_classifier(cfg, store, kind, arrays, targets, epochs, seed, tcfg=None, d
     return model, dls
 
 
+def tagger_done(cfg, kind, seed):
+    """A finished run made with the same events for every input (older runs were not)."""
+    run = RunDir(cfg, "tagger", kind.replace(":", "-"), seed)
+    if not (run.exists("metrics.json") and run.exists("best.pt")):
+        return False
+    return bool(load_json(run.file("metrics.json")).get("same_events_all_inputs"))
+
+
 def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=True):
     """Train the downstream model on one input representation.
-    qg: quark/gluon classifier. calo: incident-energy regressor."""
+    qg: quark/gluon classifier. calo: incident-energy regressor.
+    Every input uses the same train / val / test events (CacheStore.n_common)."""
     set_seed(seed)
     dev, amp, store = device(), Amp(cfg), CacheStore(cfg)
     tc = cfg["tagger"]
@@ -529,9 +539,10 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
     tgt = {"train": t_tr, "val": target_transform(cfg, raw["val"], stats)[0],
            "test": target_transform(cfg, raw["test"], stats)[0]}
     max_val = None if trial is None else max(512, (max_train or 0) // 4) or None
-    ds = {"train": TaggerDataset(store, store.array("train", kind), tgt["train"], kind, max_train),
-          "val": TaggerDataset(store, store.array("val", kind), tgt["val"], kind, max_val),
-          "test": TaggerDataset(store, store.array("test", kind), tgt["test"], kind)}
+    levels = list(cfg["data"]["levels"])
+    cap = {"train": max_train, "val": max_val, "test": None}
+    cap = {s: min(c or math.inf, store.n_common(s, levels)) for s, c in cap.items()}  # same events for every input
+    ds = {s: TaggerDataset(store, store.array(s, kind), tgt[s], kind, cap[s]) for s in ("train", "val", "test")}
     dls = {k: loader(v, tc["batch_size"], k == "train", cfg, drop_last=k == "train") for k, v in ds.items()}
     model = build_tagger(cfg, store, kind).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
@@ -544,7 +555,7 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
     total, step, best_state = epochs * len(dls["train"]), 0, None
     for epoch in range(epochs):
         model.train()
-        t0, run_loss = time.time(), 0.0
+        t0, run_loss, n_right, n_seen = time.time(), 0.0, 0, 0
         for x, g, t in dls["train"]:
             lr_now = set_lr(opt, step, total, tc["lr"], min(500, total // 10 + 1))
             with amp.ctx():
@@ -553,10 +564,14 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
             loss = F.binary_cross_entropy_with_logits(p, t) if classify else F.huber_loss(p, t, delta=1.0)
             amp.step(loss, opt, model.parameters())
             run_loss += loss.item()
+            if classify:  # accuracy while training (dropout on), the usual "train accuracy"
+                n_right += ((p.detach() > 0) == (t > 0.5)).sum().item()
+                n_seen += len(t)
             step += 1
         pv, tv = predict(model, dls["val"], dev, amp)
         if classify:
             vm = M.classification_metrics(tv, pv, n_boot=0)
+            vm["loss"] = F.binary_cross_entropy_with_logits(torch.from_numpy(pv), torch.from_numpy(tv)).item()
             objective = vm["auc"]
         else:
             vm = M.response_metrics(raw["val"][:len(pv)], np.exp(pv * stats[1] + stats[0]))
@@ -565,7 +580,9 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
         if stopper.update(objective) or best_state is None:
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         row = {"epoch": epoch, "lr": lr_now, "train_loss": run_loss / len(dls["train"]),
-               **{f"val_{k}": v for k, v in vm.items()}, "sec": round(time.time() - t0, 1)}
+               **({"train_accuracy": n_right / max(n_seen, 1)} if classify else {}),
+               **{f"val_{k}": v for k, v in vm.items()}, "best_so_far": stopper.bad == 0,
+               "sec": round(time.time() - t0, 1)}
         print({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()})
         if run is not None:
             run.log(row)
@@ -581,6 +598,7 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
     test = _task_metrics(cfg, pt, tt, raw["test"][:len(pt)], stats)
     np.savez_compressed(run.file("test_predictions.npz"), pred=pt, target=tt, target_raw=raw["test"][:len(pt)])
     run.save_metrics({"kind": kind, "seed": seed, "val_objective": stopper.best_value,
-                      "n_train": len(ds["train"]), "n_test": len(pt), "test": test})
+                      "n_train": len(ds["train"]), "n_val": len(ds["val"]), "n_test": len(pt),
+                      "same_events_all_inputs": True, "test": test})
     print(f"[{run.name}] test:", {k: v for k, v in test.items() if k != "binned"})
     return stopper.best_value

@@ -414,6 +414,16 @@ class CacheStore:
     def vqrec_path(self, split, level):
         return self.path(split, f"{self.tag}-vqrec_{level}")
 
+    def n_common(self, split, levels):
+        """Events that HR and every generated SR output of `levels` have, so that taggers on
+        different inputs are trained and scored on the same events (SR may be capped by
+        var.gen_max_per_split)."""
+        n = self.meta["n"][split]
+        for lvl in levels:
+            if self.has_sr(split, lvl, self.sr_decode("sr")):
+                n = min(n, len(np.load(self.sr_path(split, lvl, self.sr_decode("sr")), mmap_mode="r")))
+        return n
+
     def sr_decode(self, method):
         """Which stored SR file a method reads. 'sr' and 'srproj' follow cfg var.decode."""
         primary = self.cfg["var"].get("decode", "greedy")

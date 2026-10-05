@@ -5,7 +5,10 @@
     python -m superres.pipeline --dataset qg --stages all --smoke        # quick end-to-end check
 
 Stages (in order): download, prepare, tune_vqvae, train_vqvae, tune_var, train_var,
-generate, eval_sr, tune_tagger, train_taggers, summarize
+generate, eval_sr, tune_tagger, train_taggers, tagger_xeval, summarize
+
+tagger_xeval: training curves of every tagger, and the 2x3 table (a tagger trained on HR only,
+applied to HR / uniformly up-sampled LR / SR, next to a tagger trained on each input).
 """
 import argparse
 
@@ -13,7 +16,7 @@ from . import tuning
 from .config import get_config, parse_set_args
 
 ORDER = ["download", "prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_var",
-         "generate", "eval_sr", "tune_tagger", "train_taggers", "summarize"]
+         "generate", "eval_sr", "tune_tagger", "train_taggers", "tagger_xeval", "summarize"]
 
 
 def tagger_kinds(cfg, levels=None):
@@ -55,14 +58,25 @@ def run_stage(cfg, stage, levels=None, kinds=None, seeds=None):
     if stage == "tune_tagger":
         return tuning.tune_tagger(cfg)
     if stage == "train_taggers":
-        from .train import train_tagger
+        from .train import tagger_done, train_tagger
         c = tuning.with_tuned(cfg, "tagger", "hr")
         results = {}
         for kind in kinds or tagger_kinds(cfg, levels):
             for seed in seeds or cfg["tagger"]["seeds"]:
+                if not c["tagger"].get("retrain", False) and tagger_done(c, kind, seed):
+                    print(f"=== tagger on {kind}, seed {seed}: already trained - skipped (tagger.retrain=true to redo)")
+                    continue
                 print(f"\n=== tagger on {kind}, seed {seed} ===")
                 results[(kind, seed)] = train_tagger(c, kind, seed)
         return results
+    if stage == "tagger_xeval":
+        from .evaluate import plot_tagger_curves, tagger_cross_eval
+        c = tuning.with_tuned(cfg, "tagger", "hr")
+        out = {}
+        for lvl in levels:
+            plot_tagger_curves(c, lvl, seeds)
+            out[lvl] = tagger_cross_eval(c, lvl, seeds)
+        return out
     if stage == "summarize":
         from .evaluate import summarize
         return summarize(cfg)
