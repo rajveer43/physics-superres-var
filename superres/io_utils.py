@@ -2,18 +2,22 @@
 
 Layout (all names are stable, so later stages can find earlier outputs):
 
-    {drive_root}/
-      {version}/                         e.g. v2; one folder per model version
-        README_layout.md
-        {dataset}/
-          data_meta.json
-          runs/{dataset}__{version}__{stage}__{variant}__s{seed}/
-              config.json  history.csv  metrics.json  best.pt  last.pt
-              figures/      training curves (*__training_curves), and for sreval runs the
-                            observable histograms, profiles, example events and per-channel events
-              figures/diagnostics/   the same with diagnostic methods added
-          optuna/{dataset}__{version}__{stage}__{variant}.db / __trials.csv / __best.json
-          summary/{dataset}__{version}__*.csv|md  summary/figures/*.png|pdf
+    {drive_root}/                        e.g. MyDrive/GSoC_SuperRes/experiments
+      {dataset}/
+        {version}/                       e.g. v2; one folder per model version
+          {run_id}/                      one experiment: start date + tag, e.g. 2026-10-05-tokfix
+            README_layout.md
+            run_info.json                start time, git commit, GPU, config of every session
+            data_meta.json
+            runs/{dataset}__{version}__{run_id}__{stage}__{variant}__s{seed}/
+                config.json  history.csv  metrics.json  best.pt  last.pt
+                figures/      training curves (*__training_curves), and for sreval runs the
+                              observable histograms, profiles, example events and per-channel events
+                figures/diagnostics/   the same with diagnostic methods added
+            optuna/{prefix}__{stage}__{variant}.db / __trials.csv / __best.json
+            summary/{prefix}__*.csv|md  summary/figures/*.png|pdf
+
+prefix  : {dataset}__{version}__{run_id}, the start of every run, figure and table name
 
 stage   : vqvae | var | sreval | tagger
 variant : hr | pool4x4 | lr-pool4x4 | sr-pool4x4 | uniform-pool4x4 | srproj-pool4x4
@@ -35,9 +39,18 @@ def slug(s):
     return re.sub(r"[^A-Za-z0-9.\-]+", "-", str(s)).strip("-")
 
 
+def run_id(cfg):
+    return slug(cfg.get("run_id") or "untagged")
+
+
 def prefix(cfg):
-    """{dataset}__{version}: the start of every run, figure and table name."""
-    return f"{slug(cfg['dataset'])}__{slug(cfg.get('version', 'v1'))}"
+    """{dataset}__{version}__{run_id}: the start of every run, figure and table name."""
+    return f"{slug(cfg['dataset'])}__{slug(cfg.get('version', 'v1'))}__{run_id(cfg)}"
+
+
+def model_tag(cfg):
+    """{version}-{run_id}: marks model outputs in the local cache."""
+    return f"{slug(cfg.get('version', 'v1'))}-{run_id(cfg)}"
 
 
 def run_name(cfg, stage, variant, seed=None):
@@ -74,18 +87,28 @@ def load_json(path):
         return json.load(f)
 
 
-def version_root(cfg):
-    return os.path.join(cfg["paths"]["drive_root"], cfg.get("version", "v1"))
-
-
-def dataset_root(cfg):
-    root = os.path.join(version_root(cfg), cfg["dataset"])
+def experiment_root(cfg):
+    """{drive_root}/{dataset}/{version}/{run_id}: everything one experiment writes."""
+    root = os.path.join(cfg["paths"]["drive_root"], cfg["dataset"], slug(cfg.get("version", "v1")), run_id(cfg))
     os.makedirs(root, exist_ok=True)
-    readme = os.path.join(version_root(cfg), "README_layout.md")
+    readme = os.path.join(root, "README_layout.md")
     if not os.path.exists(readme):
         with open(readme, "w") as f:
             f.write("# Result layout\n\n```" + LAYOUT_README + "```\n")
     return root
+
+
+dataset_root = experiment_root
+
+
+def save_run_info(cfg, **session):
+    """run_info.json: when the experiment started, plus one entry per session (code commit, GPU, config)."""
+    path = os.path.join(experiment_root(cfg), "run_info.json")
+    info = load_json(path) if os.path.exists(path) else {
+        "experiment": prefix(cfg), "started": now(), "sessions": []}
+    info["sessions"].append({"time": now(), **session, "config": cfg})
+    save_json(path, info)
+    return info
 
 
 def summary_dir(cfg, sub=""):
@@ -159,7 +182,7 @@ class RunDir:
 def study_paths(cfg, stage, variant):
     name = run_name(cfg, stage, variant)
     drive_dir = os.path.join(dataset_root(cfg), "optuna")
-    local_dir = os.path.join(cfg["paths"]["cache_root"], "optuna", cfg.get("version", "v1"))
+    local_dir = os.path.join(cfg["paths"]["cache_root"], "optuna", model_tag(cfg))
     os.makedirs(drive_dir, exist_ok=True)
     os.makedirs(local_dir, exist_ok=True)
     return {

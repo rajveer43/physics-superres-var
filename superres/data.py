@@ -6,11 +6,11 @@ Cache (local disk, numpy memmaps, linear energies, float32):
     {split}_hr.npy        (N, C, *hr_shape)       zero-padded ground truth
     {split}_{level}.npy   (N, C, *hr_shape / f)   sum-pooled low resolution
     {split}_target.npy    (N,)                    qg: class label, calo: E_inc [MeV]
-    {split}_{version}-sr-{decode}_{level}.npy     VAR output (written by generate); decode = greedy | sample
-    test_{version}-vqrec_{level}.npy              tokenizer-only reconstruction (written by eval_sr)
+    {split}_{tag}-sr-{decode}_{level}.npy     VAR output (written by generate); decode = greedy | sample
+    test_{tag}-vqrec_{level}.npy              tokenizer-only reconstruction (written by eval_sr)
 
-Model outputs carry the config version, so outputs of an older model are never
-picked up by mistake; the HR / LR / target arrays are shared by all versions.
+Model outputs carry tag = {version}-{run_id}, so outputs of another model or experiment
+are never picked up by mistake; the HR / LR / target arrays are shared by all of them.
 
 Network inputs use x = log1p(E / (s_c * V)), where s_c is the mean non-zero
 cell energy of channel c and V the number of fine cells merged into one cell
@@ -396,7 +396,7 @@ class CacheStore:
         self.levels = {k: tuple(v) for k, v in self.meta["levels"].items()}
         self.hr_shape = tuple(self.meta["hr_shape"])
         self.C = len(self.meta["channels"])
-        self.version = cfg.get("version", "v1")
+        self.tag = io_utils.model_tag(cfg)
 
     def path(self, split, what):
         return os.path.join(self.dir, f"{split}_{what}.npy")
@@ -406,13 +406,13 @@ class CacheStore:
 
     def sr_path(self, split, level, decode="greedy"):
         """decode: 'greedy' (most likely token) or 'sample' (tokens drawn from the predicted distribution)."""
-        return self.path(split, f"{self.version}-sr-{decode}_{level}")
+        return self.path(split, f"{self.tag}-sr-{decode}_{level}")
 
     def has_sr(self, split, level, decode="greedy"):
         return os.path.exists(self.sr_path(split, level, decode))
 
     def vqrec_path(self, split, level):
-        return self.path(split, f"{self.version}-vqrec_{level}")
+        return self.path(split, f"{self.tag}-vqrec_{level}")
 
     def sr_decode(self, method):
         """Which stored SR file a method reads. 'sr' and 'srproj' follow cfg var.decode."""

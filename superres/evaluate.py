@@ -485,7 +485,7 @@ def _md(df):
 
 def _write_report(cfg, sections, sdir):
     ds, pfx = cfg["dataset"], io_utils.prefix(cfg)
-    lines = [f"# {ds} super-resolution summary ({cfg.get('version', 'v1')})", "", f"generated {io_utils.now()}", "",
+    lines = [f"# {ds} super-resolution summary ({cfg.get('version', 'v1')}, {io_utils.run_id(cfg)})", "", f"generated {io_utils.now()}", "",
              "SR means the model output exactly as generated. Columns such as 'Uniform upsample', "
              "'SR + energy constraint' and 'Tokenizer only' are diagnostics.", ""]
     for title, t in sections:

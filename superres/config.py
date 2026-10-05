@@ -13,17 +13,20 @@ ZENODO_RECORD = "6366271"
 CALO_R_EDGES = [0.0, 4.65, 9.3, 13.95, 18.6, 27.9, 37.2, 46.5, 55.8, 65.1]
 
 BASE = {
-    # Results go to {drive_root}/{version}/{dataset}/ and every run, figure and table name starts
-    # with {dataset}__{version}, so a new model version never overwrites or mixes with an old one.
+    # Results go to {drive_root}/{dataset}/{version}/{run_id}/ and every run, figure and table name
+    # starts with {dataset}__{version}__{run_id}, so no experiment overwrites or mixes with another.
     # v1: single-head decoder, 16x16 latent, total-energy loss.
     # v2: hit/energy decoder heads, LR image into the decoder, 32x32 latent, per-channel energy loss.
     "version": "v2",
+    # One experiment = one training campaign: start date + short tag, e.g. "2026-10-05-tokfix".
+    # Keep the same run_id to resume or re-evaluate it; a new run_id starts from scratch.
+    "run_id": None,
     "seed": 42,
     "num_workers": 2,
     "amp": True,
     "paths": {
         # Results (checkpoints, metrics, figures, Optuna DBs) -> Google Drive.
-        "drive_root": "/content/drive/MyDrive/superres_results",
+        "drive_root": "/content/drive/MyDrive/GSoC_SuperRes/experiments",
         # Raw downloads and preprocessed memmaps -> fast local Colab disk.
         "raw_root": "/content/data/raw",
         "cache_root": "/content/data/cache",

@@ -91,7 +91,7 @@ GitHub and re-run the cell. The runtime doesn't need restarting.
 
 1. Set the runtime to GPU.
 2. Keep `SMOKE = True` and run all cells. This is a quick pass on a tiny subset
-   with 1–2 epochs, and it writes to `superres_results_smoke/`.
+   with 1–2 epochs, and it writes to `MyDrive/GSoC_SuperRes/smoke_tests/`.
    `FAKE_DATA = True` does the same on synthetic data, with no download.
 3. Set `SMOKE = False` and run all cells again for the real results.
 4. Change `DATASET` to `'calo'` or `'qg'` and repeat. Run one dataset per
@@ -101,7 +101,7 @@ Command-line alternative (for example on a cluster):
 
 ```bash
 pip install -r requirements.txt
-python -m superres.pipeline --dataset calo --stages all --set paths.drive_root=/path/results
+python -m superres.pipeline --dataset calo --stages all --set paths.drive_root=/path/experiments run_id=2026-10-05-tokfix
 python -m superres.pipeline --dataset qg --stages train_var,generate --levels pool8x8 --set var.epochs=20
 python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-end check
 ```
@@ -112,14 +112,14 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 |---|---|---|
 | `download` | Zenodo (calo, md5-checked) or CERNBox share over WebDAV (qg); resumable `wget -c` | `/content/data/raw/<ds>/` |
 | `prepare` | Pad, clip negatives, sum-pool to every LR level, split into train/val/test, per-channel energy scale | `/content/data/cache/<ds>/*.npy`, `data_meta.json` on Drive |
-| `tune_vqvae` | Optuna: lr, codebook size, latent channels, β, energy weight, width | `optuna/<ds>__vqvae__hr*` |
-| `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `runs/<ds>__<ver>__vqvae__hr__s42/` |
-| `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `optuna/<ds>__var__all*` |
-| `train_var` | One conditional VAR per LR level | `runs/<ds>__<ver>__var__<level>__s42/` |
-| `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `/content/data/cache/<ds>/*_<ver>-sr-<decode>_<level>.npy` |
-| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `runs/<ds>__<ver>__sreval__<level>/` |
-| `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `optuna/<ds>__tagger__hr*` |
-| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `runs/<ds>__<ver>__tagger__<input>__s<seed>/` |
+| `tune_vqvae` | Optuna: lr, codebook size, latent channels, β, energy weight, width | `optuna/<prefix>__vqvae__hr*` |
+| `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `runs/<prefix>__vqvae__hr__s42/` |
+| `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `optuna/<prefix>__var__all*` |
+| `train_var` | One conditional VAR per LR level | `runs/<prefix>__var__<level>__s42/` |
+| `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `/content/data/cache/<ds>/*_<ver>-<run_id>-sr-<decode>_<level>.npy` |
+| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `runs/<prefix>__sreval__<level>/` |
+| `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `optuna/<prefix>__tagger__hr*` |
+| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `runs/<prefix>__tagger__<input>__s<seed>/` |
 | `summarize` | Tables, plots and a markdown report across all runs | `summary/` |
 
 Every training stage resumes from `last.pt` on Drive. Optuna studies resume from
@@ -128,12 +128,14 @@ their database copy on Drive. After a disconnect, re-run the notebook from the t
 ### Result layout and naming on Drive
 
 ```
-MyDrive/superres_results/            (…_smoke/ and …_fake/ for test runs)
-  <version>/                          v2 = current model; v1 results stay in MyDrive/superres_results/<dataset>/
-    README_layout.md
-    <dataset>/
+MyDrive/GSoC_SuperRes/
+  smoke_tests/                        same layout as experiments/, for SMOKE / FAKE_DATA runs
+  experiments/                        (v1 results stay in MyDrive/superres_results/)
+   <dataset>/<version>/<run_id>/      one experiment, e.g. qg/v2/2026-10-05-tokfix/
+      README_layout.md
+      run_info.json                   start time; per session: commit, GPU, full config
       data_meta.json                  shapes, splits, energy scales, label counts
-      runs/<dataset>__<version>__<stage>__<variant>__s<seed>/
+      runs/<prefix>__<stage>__<variant>__s<seed>/
           config.json                 full config + creation time
           history.csv                 one row per epoch
           metrics.json                final / test metrics
@@ -143,21 +145,24 @@ MyDrive/superres_results/            (…_smoke/ and …_fake/ for test runs)
           observables.csv             sreval only
           figures/  figures/diagnostics/            sreval only: histograms, profiles,
                                       example events, per-channel events (png + pdf)
-      optuna/<dataset>__<version>__<stage>__<variant>.db | __trials.csv | __best.json
+      optuna/<prefix>__<stage>__<variant>.db | __trials.csv | __best.json
       summary/
-          <dataset>__<version>__tagger_runs.csv     one row per tagger run
-          <dataset>__<version>__tagger_summary.csv  mean and std over seeds
-          <dataset>__<version>__sr_observables.csv  all observable comparisons
-          <dataset>__<version>__values__<level>.csv mean of each quantity: HR | LR | SR | diagnostics
-          <dataset>__<version>__sr_w1_table.csv     observable x (level, method) W1 table
-          <dataset>__<version>__c2st_closure.csv    two-sample-test AUC and LR closure
-          <dataset>__<version>__report.md           all tables in one page
+          <prefix>__tagger_runs.csv     one row per tagger run
+          <prefix>__tagger_summary.csv  mean and std over seeds
+          <prefix>__sr_observables.csv  all observable comparisons
+          <prefix>__values__<level>.csv mean of each quantity: HR | LR | SR | diagnostics
+          <prefix>__sr_w1_table.csv     observable x (level, method) W1 table
+          <prefix>__c2st_closure.csv    two-sample-test AUC and LR closure
+          <prefix>__report.md           all tables in one page
           figures/                    AUC or resolution vs level, W1 heatmaps, resolution vs E
 ```
 
-- `version` comes from `config.py` (`"version": "v2"`). Change it for a new model
-  variant and nothing older is overwritten; SR outputs in the local cache carry
-  it too.
+- `<prefix>` = `<dataset>__<version>__<run_id>`, e.g. `qg__v2__2026-10-05-tokfix`.
+- `version` comes from `config.py` (`"version": "v2"`): change it for a new model design.
+- `run_id` = start date + short tag, one per experiment (set in the notebook with
+  `RUN_TAG` / `RUN_DATE`). Reuse it to resume or re-evaluate; a new one starts from
+  scratch and has its own Optuna studies. Nothing from another experiment is overwritten,
+  and SR outputs in the local cache carry `<version>-<run_id>` too.
 - `stage` is one of `vqvae`, `var`, `sreval` or `tagger`.
 - `variant` is the input or level, e.g. `hr`, `pool4x4`, `lr-pool4x4` or
   `sr-pool4x4`.
