@@ -25,7 +25,7 @@ from matplotlib.colors import LogNorm  # noqa: E402
 from . import io_utils  # noqa: E402
 from . import metrics as M  # noqa: E402
 from .data import LEGACY_KINDS, CacheStore, hit_threshold  # noqa: E402
-from .observables import cell_spectrum, jet_observables, shower_observables  # noqa: E402
+from .observables import GRID_DEPENDENT, cell_spectrum, jet_observables, shower_observables  # noqa: E402
 from .physics_ops import sum_pool  # noqa: E402
 
 KIND = {"lr": "lr", "sr": "sr", "sr-sample": "srsample", "sr-greedy": "srgreedy",
@@ -50,6 +50,15 @@ def _style(m):
 
 def _is_relative(ds, name):
     return any(name.startswith(p) for p in RELATIVE[ds])
+
+
+def _comparable(m, name):
+    """Hit counts and ptD change with the cell size, so LR (on its coarse grid) is left out of them."""
+    return not (m == "lr" and name.startswith(GRID_DEPENDENT))
+
+
+PAIRED_PLOTS = {"qg": ("sum_tracks", "sum_all", "jet_pt", "jet_mass", "girth", "dR_std", "n_hits"),
+                "calo": ("e_total", "depth_centroid", "r_width", "n_hits")}
 
 
 def _observables(cfg, store, E, factor, e_inc):
@@ -97,17 +106,31 @@ def c2st_auc(cfg, store, ref, other, seed):
 
 
 # ----------------------------------------------------------------- plotting
-def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
-    lo, hi = np.percentile(ref, [0.5, 99.5])
+def _hist_range(ref, others):
+    """Range covering the bulk (0.5-99.5 %) of every distribution, so a shifted one is drawn where
+    it is instead of being piled into an edge bin."""
+    qs = np.array([np.percentile(v[np.isfinite(v)], [0.5, 99.5]) for v in [ref, *others.values()] if len(v)])
+    lo, hi = qs[:, 0].min(), qs[:, 1].max()
     if lo == hi:
-        lo, hi = ref.min(), ref.max() + 1e-9
+        lo, hi = lo - 0.5, hi + 0.5
+    return lo, hi
+
+
+def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
+    lo, hi = _hist_range(ref, others)
     edges = np.linspace(lo, hi, bins + 1)
     fig, (ax, rx) = plt.subplots(2, 1, figsize=(5, 4.6), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
-    h_ref, _ = np.histogram(ref, edges, density=True)
+    h_ref, _ = np.histogram(ref, edges)
+    h_ref = h_ref / max(len(ref), 1) / np.diff(edges)  # normalised to all events, so out-of-range ones are missing
     ax.stairs(h_ref, edges, fill=True, alpha=0.3, **STYLE["hr"])
     for m, v in others.items():
-        h, _ = np.histogram(np.clip(v, lo, hi), edges, density=True)  # out-of-range values go to the edge bins
-        ax.stairs(h, edges, lw=1.4, **_style(m))
+        h, _ = np.histogram(v, edges)
+        out = 1 - h.sum() / max(len(v), 1)
+        h = h / max(len(v), 1) / np.diff(edges)
+        style = _style(m)
+        if out > 0.001:
+            style = dict(style, label=f"{style['label']} ({100 * out:.1f}% outside)")
+        ax.stairs(h, edges, lw=1.4, **style)
         with np.errstate(divide="ignore", invalid="ignore"):
             rx.stairs(np.where(h_ref > 0, h / h_ref, np.nan), edges, color=_style(m)["color"], lw=1.2)
     rx.axhline(1, color="0.3", lw=0.8)
@@ -117,6 +140,26 @@ def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
     ax.set_ylabel("normalised")
     ax.legend(fontsize=7, frameon=False)
     io_utils.save_figure(fig, fig_dir, f"{prefix}__hist__{name}")
+    plt.close(fig)
+
+
+def _scatter(ref, others, name, fig_dir, prefix, max_points=3000):
+    """Same events: each method's value against the HR value, with the y = x line."""
+    fig, axes = plt.subplots(1, len(others), figsize=(3.6 * len(others), 3.6), squeeze=False)
+    lo, hi = _hist_range(ref, others)
+    for ax, (m, v) in zip(axes[0], others.items()):
+        k = min(len(ref), len(v), max_points)
+        p = M.paired_metrics(ref[:k], v[:k])
+        ax.scatter(ref[:k], v[:k], s=3, alpha=0.3, color=_style(m)["color"], rasterized=True)
+        ax.plot([lo, hi], [lo, hi], color="0.3", lw=0.8)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_xlabel(f"{name}, HR (truth)")
+        ax.set_ylabel(f"{name}, {_style(m)['label']}", fontsize=8)
+        ax.set_title(f"bias {100 * p['bias']:+.1f}%  res. {100 * p['resolution']:.1f}%  r = {p['pearson_r']:.2f}",
+                     fontsize=8)
+    fig.tight_layout()
+    io_utils.save_figure(fig, fig_dir, f"{prefix}__scatter__{name}")
     plt.close(fig)
 
 
@@ -248,7 +291,7 @@ def evaluate_level(cfg, level, with_c2st=True):
             return E
         return np.asarray(store.array("test", f"{KIND[m]}:{level}")[:n], np.float32)
 
-    rows, consistency, obs, profs = [], {}, {}, {}
+    rows, paired, consistency, obs, profs = [], [], {}, {}, {}
     n_ex = min(ev["n_examples"], n)
     imgs, diag_imgs = {"hr": hr[:n_ex]}, {}
     for m in main + diag:
@@ -261,9 +304,11 @@ def evaluate_level(cfg, level, with_c2st=True):
         obs[m], profs[m] = s, p
         role = "main" if m in main else "diagnostic"
         for name in ref_s:
-            if name in s:
+            if name in s and _comparable(m, name):
                 rows.append({"dataset": ds, "level": level, "method": m, "role": role, "observable": name,
                              **M.compare_distributions(ref_s[name], s[name], _is_relative(ds, name))})
+                paired.append({"dataset": ds, "level": level, "method": m, "role": role, "observable": name,
+                               **M.paired_metrics(ref_s[name], s[name])})
         if m != "lr":  # on the HR grid: cell spectrum and agreement with the coarse measurement
             spec = cell_spectrum(E, thr)
             rows.append({"dataset": ds, "level": level, "method": m, "role": role, "observable": "log10_cell_energy",
@@ -276,6 +321,7 @@ def evaluate_level(cfg, level, with_c2st=True):
         del E
     df = pd.DataFrame(rows)
     df.to_csv(run.file("observables.csv"), index=False)
+    pd.DataFrame(paired).to_csv(run.file("paired.csv"), index=False)
 
     c2st = {}
     if with_c2st:
@@ -288,12 +334,15 @@ def evaluate_level(cfg, level, with_c2st=True):
 
     bins = ev["hist_bins"]
     diag_dir = os.path.join(run.fig_dir, "diagnostics")
+    def pick(methods, name):
+        return {m: obs[m][name] for m in methods if name in obs[m] and _comparable(m, name)}
+
     for name in ref_s:
-        _hist_with_ratio(ref_s[name], {m: obs[m][name] for m in main if name in obs[m]}, name, bins,
-                         run.fig_dir, prefix)
+        _hist_with_ratio(ref_s[name], pick(main, name), name, bins, run.fig_dir, prefix)
         if diag:
-            _hist_with_ratio(ref_s[name], {m: obs[m][name] for m in main + diag if name in obs[m]}, name, bins,
-                             diag_dir, prefix)
+            _hist_with_ratio(ref_s[name], pick(main + diag, name), name, bins, diag_dir, prefix)
+        if name in PAIRED_PLOTS[ds] and pick(main, name):
+            _scatter(ref_s[name], pick(main, name), name, run.fig_dir, prefix)
     _profiles(ref_p, {m: profs[m] for m in main}, run.fig_dir, prefix)
     if diag:
         _profiles(ref_p, profs, diag_dir, prefix)
@@ -307,6 +356,160 @@ def evaluate_level(cfg, level, with_c2st=True):
             _channel_panels(cfg, {**imgs, **diag_imgs}, f, level, diag_dir, prefix, n_ex)
     print(f"[{run.name}] {n} events; main: {main}; diagnostics: {diag}; figures in {run.fig_dir}")
     return df
+
+
+# ------------------------------------------------------------ tagger checks
+def _tagger_run_path(cfg, kind, seed):
+    """Path of a tagger run without creating it (RunDir would make the folder)."""
+    return os.path.join(io_utils.dataset_root(cfg), "runs",
+                        io_utils.run_name(cfg, "tagger", kind.replace(":", "-"), seed))
+
+
+def _tagger_key(cfg):
+    return ("auc", "ROC AUC") if cfg["tagger"]["task"] == "classification" else \
+        ("mean_binned_resolution", "energy resolution")
+
+
+def plot_tagger_curves(cfg, level, seeds=None):
+    """Training curves of the taggers on HR, LR, SR (and uniform, if trained) in one figure:
+    one colour per input, a thin line per seed, a dot at the epoch whose weights were kept."""
+    seeds = seeds or cfg["tagger"]["seeds"]
+    classify = cfg["tagger"]["task"] == "classification"
+    panels = ([("train_loss", "training loss"), ("val_loss", "validation loss"),
+               ("train_accuracy", "training accuracy"), ("val_accuracy", "validation accuracy"),
+               ("val_auc", "validation ROC AUC")] if classify else
+              [("train_loss", "training loss"), ("val_mean_binned_resolution", "validation resolution")])
+    best_col, best_fn = ("val_auc", np.nanargmax) if classify else ("val_mean_binned_resolution", np.nanargmin)
+    hist = {}
+    for kind in ("hr", f"lr:{level}", f"sr:{level}", f"uniform:{level}"):
+        for s in seeds:
+            path = os.path.join(_tagger_run_path(cfg, kind, s), "history.csv")
+            if os.path.exists(path):
+                hist[(kind, s)] = pd.read_csv(path)
+    if not hist:
+        print(f"  [{level}] no tagger histories yet")
+        return None
+    panels = [(c, t) for c, t in panels if any(c in h for h in hist.values())]
+    fig, axes = plt.subplots(1, len(panels), figsize=(3.6 * len(panels), 3.4), squeeze=False)
+    for ax, (col, title) in zip(axes[0], panels):
+        for (kind, s), h in hist.items():
+            if col not in h:
+                continue
+            st = _style(kind.split(":")[0])
+            first = s == min(sd for (k, sd) in hist if k == kind)
+            ax.plot(h["epoch"], h[col], "-", lw=1.1, alpha=0.8, color=st["color"],
+                    label=st["label"] if first else None)
+            if best_col in h:
+                b = int(best_fn(h[best_col].values))
+                ax.plot(h["epoch"].iloc[b], h[col].iloc[b], "o", ms=4, color=st["color"])
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("epoch")
+    axes[0, 0].legend(fontsize=7, frameon=False)
+    fig.suptitle(f"{cfg['dataset']} {level}: tagger training, seeds {list(seeds)} "
+                 f"(dot = epoch kept by early stopping)", fontsize=9)
+    fig.tight_layout()
+    fdir = io_utils.summary_dir(cfg, "figures")
+    io_utils.save_figure(fig, fdir, f"{io_utils.prefix(cfg)}__tagger_curves__{level}")
+    plt.close(fig)
+    return fig
+
+
+def tagger_cross_eval(cfg, level, seeds=None):
+    """The 2x3 check. Column A: one tagger trained on HR, applied unchanged to HR, to LR stretched
+    back to the HR grid (uniform up-sampling: the coarse energy spread evenly, i.e. a blurred HR)
+    and to SR. Column B: a tagger trained and tested on each input (the train_taggers runs).
+    A(SR) close to A(HR) while A(uniform) is lower: SR restores the detail the HR tagger uses.
+    A(SR) well below B(SR): SR images are informative but distributed differently from HR."""
+    import torch
+    from .data import TaggerDataset, target_transform
+    from .train import Amp, _task_metrics, build_tagger, device, loader, predict
+    seeds = seeds or cfg["tagger"]["seeds"]
+    store = CacheStore(cfg)
+    key, key_label = _tagger_key(cfg)
+    n = store.n_common("test", list(cfg["data"]["levels"]))
+    raw = store.target("test")
+    dev, amp = device(), Amp(cfg)
+    a_inputs = {"HR": "hr", "LR": f"uniform:{level}", "SR": f"sr:{level}"}
+    if store.has_sr("test", level, store.sr_decode("srproj")):
+        a_inputs["SR + energy constraint"] = f"srproj:{level}"
+    b_inputs = {"HR": "hr", "LR": f"lr:{level}", "SR": f"sr:{level}"}
+    rows = []
+    for seed in seeds:
+        ck_path = os.path.join(_tagger_run_path(cfg, "hr", seed), "best.pt")
+        if not os.path.exists(ck_path):
+            print(f"  [{level}] no HR tagger for seed {seed} - column A skipped")
+        else:
+            ck = torch.load(ck_path, map_location="cpu", weights_only=False)
+            model = build_tagger(cfg, store, "hr", ck["tagger_cfg"])
+            model.load_state_dict(ck["model"])
+            model.to(dev)
+            t, _ = target_transform(cfg, raw, ck["target_stats"])
+            for row_name, kind in a_inputs.items():
+                ds = TaggerDataset(store, store.array("test", kind), t, kind, n)
+                p, tt = predict(model, loader(ds, cfg["tagger"]["batch_size"], False, cfg), dev, amp)
+                m = _task_metrics(cfg, p, tt, raw[:len(p)], ck["target_stats"])
+                rows.append({"level": level, "seed": seed, "column": "A: trained on HR", "evaluated_on": row_name,
+                             "input": kind, "n_test": len(p), **{k: v for k, v in m.items() if k != "binned"}})
+        for row_name, kind in b_inputs.items():
+            path = os.path.join(_tagger_run_path(cfg, kind, seed), "metrics.json")
+            if not os.path.exists(path):
+                continue
+            m = io_utils.load_json(path)
+            rows.append({"level": level, "seed": seed, "column": "B: trained on each input", "evaluated_on": row_name,
+                         "input": kind, "n_test": m["n_test"], "same_events": bool(m.get("same_events_all_inputs")),
+                         **{k: v for k, v in m["test"].items() if not isinstance(v, list)}})
+    if not rows:
+        print(f"  [{level}] no taggers yet")
+        return None
+    long = pd.DataFrame(rows)
+    pfx, sdir = io_utils.prefix(cfg), io_utils.summary_dir(cfg)
+    long.to_csv(os.path.join(sdir, f"{pfx}__tagger_2x3_runs__{level}.csv"), index=False)
+    table = _table_2x3(long, key, list(a_inputs))
+    table.to_csv(os.path.join(sdir, f"{pfx}__tagger_2x3__{level}.csv"))
+    _plot_2x3(long, key, key_label, list(a_inputs), level, cfg)
+    if "same_events" in long and not long["same_events"].fillna(True).all():
+        print(f"  [{level}] some column-B runs predate the same-events change; retrain them for a fair table")
+    return table
+
+
+def _table_2x3(long, key, row_order):
+    """'mean ± spread over seeds (n seeds)' per cell; the bootstrap error when there is one seed."""
+    out = {}
+    for col, g in long.groupby("column"):
+        cells = {}
+        for r, gg in g.groupby("evaluated_on"):
+            v = gg[key].astype(float)
+            if len(v) > 1:
+                err, how = v.std(ddof=1), f"{len(v)} seeds"
+            else:
+                err = gg.get(f"{key}_boot_err", pd.Series([np.nan])).iloc[0]
+                how = "1 seed, test-set bootstrap"
+            cells[r] = f"{v.mean():.4f} ± {err:.4f} ({how})" if np.isfinite(err) else f"{v.mean():.4f} ({how})"
+        out[col] = cells
+    t = pd.DataFrame(out)
+    return t.reindex([r for r in row_order if r in t.index])
+
+
+def _plot_2x3(long, key, key_label, row_order, level, cfg):
+    cols = sorted(long["column"].unique())
+    rows = [r for r in row_order if r in set(long["evaluated_on"])]
+    fig, ax = plt.subplots(figsize=(1.6 * len(rows) + 2.5, 3.6))
+    w = 0.8 / len(cols)
+    for j, col in enumerate(cols):
+        g = long[long["column"] == col].groupby("evaluated_on")[key]
+        mean = [g.mean().get(r, np.nan) for r in rows]
+        err = [g.std(ddof=1).get(r, np.nan) if g.count().get(r, 0) > 1 else 0 for r in rows]
+        ax.bar(np.arange(len(rows)) + (j - (len(cols) - 1) / 2) * w, mean, w, yerr=err, capsize=3, label=col,
+               color=["tab:gray", "tab:blue"][j % 2], alpha=0.85)
+    ax.set_xticks(range(len(rows)))
+    ax.set_xticklabels(["LR (stretched to HR grid in A)" if r == "LR" else r for r in rows], fontsize=8)
+    vals = long[key].astype(float)
+    ax.set_ylim(vals.min() - 0.05 * abs(vals.min()), vals.max() + 0.03 * abs(vals.max()))
+    ax.set_ylabel(f"tagger {key_label}")
+    ax.set_title(f"{cfg['dataset']} {level}: tagger trained on HR (A) vs trained on each input (B)", fontsize=9)
+    ax.legend(fontsize=8, frameon=False)
+    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}__tagger_2x3__{level}")
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------- summaries
@@ -372,6 +575,12 @@ def summarize(cfg):
         _plot_tagger(tag, key, levels, fdir, ds, pfx)
         if ds == "calo":
             _plot_calo_resolution(cfg, fdir, pfx)
+    for level in levels:
+        path = os.path.join(sdir, f"{pfx}__tagger_2x3__{level}.csv")
+        if os.path.exists(path):
+            sections.append((f"{level}: tagger {_tagger_key(cfg)[1]}, A = trained on HR only and applied to each "
+                             "input (LR stretched back to the HR grid), B = trained and tested on each input",
+                             pd.read_csv(path, index_col=0)))
 
     # SR observables
     frames = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(
@@ -386,6 +595,18 @@ def summarize(cfg):
                 t.to_csv(os.path.join(sdir, f"{pfx}__values__{level}.csv"))
                 sections.append((f"{level}: mean of each quantity for the truth, the coarse input and the "
                                  "super-resolved output (other columns are diagnostics)", t))
+        pf = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(
+            io_utils.dataset_root(cfg), "runs", f"{pfx}__sreval__*", "paired.csv")))]
+        pf = [p for p in pf if not p.empty]
+        if pf:
+            pair = pd.concat(pf, ignore_index=True)
+            pair.to_csv(os.path.join(sdir, f"{pfx}__paired.csv"), index=False)
+            for level in levels:
+                s = pair[(pair["level"] == level) & (pair["role"] == "main")]
+                if not s.empty:
+                    t = s.pivot_table(index="observable", columns="method", values=["bias", "resolution", "pearson_r"])
+                    sections.append((f"{level}: event by event against HR. bias = mean(X - HR) / mean(HR), "
+                                     "resolution = std(X - HR) / mean(HR), pearson_r = correlation", t))
         piv = obs.pivot_table(index="observable", columns=["level", "method"], values="w1_over_sigma")
         piv.to_csv(os.path.join(sdir, f"{pfx}__sr_w1_table.csv"))
         sections.append(("Distance to the HR distribution, W1 / sigma_HR (0 = identical)", piv))
