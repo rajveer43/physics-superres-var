@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from . import metrics as M
 from .data import CacheStore, SRDataset, TaggerDataset, hit_threshold, normalize, target_transform
-from .io_utils import RunDir, load_json
+from .io_utils import RunDir, load_json, run_path
 from .models import VQVAE, ConditionalVAR, Tagger
 
 
@@ -518,10 +518,10 @@ def fit_classifier(cfg, store, kind, arrays, targets, epochs, seed, tcfg=None, d
 
 def tagger_done(cfg, kind, seed):
     """A finished run made with the same events for every input (older runs were not)."""
-    run = RunDir(cfg, "tagger", kind.replace(":", "-"), seed)
-    if not (run.exists("metrics.json") and run.exists("best.pt")):
+    path = run_path(cfg, "tagger", kind.replace(":", "-"), seed)
+    if not (os.path.exists(os.path.join(path, "metrics.json")) and os.path.exists(os.path.join(path, "best.pt"))):
         return False
-    return bool(load_json(run.file("metrics.json")).get("same_events_all_inputs"))
+    return bool(load_json(os.path.join(path, "metrics.json")).get("same_events_all_inputs"))
 
 
 def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=True):

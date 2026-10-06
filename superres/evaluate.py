@@ -139,7 +139,7 @@ def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
     rx.set_xlabel(name)
     ax.set_ylabel("normalised")
     ax.legend(fontsize=7, frameon=False)
-    io_utils.save_figure(fig, fig_dir, f"{prefix}__hist__{name}")
+    io_utils.save_figure(fig, fig_dir, f"{prefix}_hist_{name}")
     plt.close(fig)
 
 
@@ -159,7 +159,7 @@ def _scatter(ref, others, name, fig_dir, prefix, max_points=3000):
         ax.set_title(f"bias {100 * p['bias']:+.1f}%  res. {100 * p['resolution']:.1f}%  r = {p['pearson_r']:.2f}",
                      fontsize=8)
     fig.tight_layout()
-    io_utils.save_figure(fig, fig_dir, f"{prefix}__scatter__{name}")
+    io_utils.save_figure(fig, fig_dir, f"{prefix}_scatter_{name}")
     plt.close(fig)
 
 
@@ -182,7 +182,7 @@ def _profiles(ref_p, other_p, fig_dir, prefix):
         rx.set_ylim(0.5, 1.5)
         rx.set_ylabel("ratio to HR")
         rx.set_xlabel(xlabel)
-        io_utils.save_figure(fig, fig_dir, f"{prefix}__profile__{pname}")
+        io_utils.save_figure(fig, fig_dir, f"{prefix}_profile_{pname}")
         plt.close(fig)
 
 
@@ -214,7 +214,7 @@ def _examples(cfg, images, lr_factor, fig_dir, prefix, n):
         fig.colorbar(im, ax=list(axes[i]), fraction=0.025, pad=0.01).set_label("energy per pixel", fontsize=7)
     fig.suptitle("One event per row; all panels in a row share the colour scale (LR shown per fine-pixel area)",
                  fontsize=9)
-    io_utils.save_figure(fig, fig_dir, f"{prefix}__examples")
+    io_utils.save_figure(fig, fig_dir, f"{prefix}_examples")
     plt.close(fig)
 
 
@@ -254,7 +254,7 @@ def _channel_panels(cfg, rows, lr_factor, level, fig_dir, prefix, n):
         fig.suptitle(f"Per-channel jet image, {level} ({f} pixels merged into one, then super-resolved)\n"
                      f"test event {i}; each column shares one colour scale ({'log' if log else 'linear'})",
                      fontsize=11)
-        io_utils.save_figure(fig, fig_dir, f"{prefix}__channels__event{i}")
+        io_utils.save_figure(fig, fig_dir, f"{prefix}_channels_event{i}")
         plt.close(fig)
 
 
@@ -263,7 +263,7 @@ def evaluate_level(cfg, level, with_c2st=True):
     store = CacheStore(cfg)
     ds, ev = cfg["dataset"], cfg["eval"]
     run = io_utils.RunDir(cfg, "sreval", level)
-    prefix = f"{io_utils.prefix(cfg)}__{level}"
+    prefix = f"{io_utils.prefix(cfg)}_{level}"
     f = store.levels[level]
     ones = (1,) * len(store.hr_shape)
     main, diag = _resolve_methods(cfg, store, level)
@@ -361,8 +361,7 @@ def evaluate_level(cfg, level, with_c2st=True):
 # ------------------------------------------------------------ tagger checks
 def _tagger_run_path(cfg, kind, seed):
     """Path of a tagger run without creating it (RunDir would make the folder)."""
-    return os.path.join(io_utils.dataset_root(cfg), "runs",
-                        io_utils.run_name(cfg, "tagger", kind.replace(":", "-"), seed))
+    return io_utils.run_path(cfg, "tagger", kind.replace(":", "-"), seed)
 
 
 def _tagger_key(cfg):
@@ -409,7 +408,7 @@ def plot_tagger_curves(cfg, level, seeds=None):
                  f"(dot = epoch kept by early stopping)", fontsize=9)
     fig.tight_layout()
     fdir = io_utils.summary_dir(cfg, "figures")
-    io_utils.save_figure(fig, fdir, f"{io_utils.prefix(cfg)}__tagger_curves__{level}")
+    io_utils.save_figure(fig, fdir, f"{io_utils.prefix(cfg)}_tagger-curves_{level}")
     plt.close(fig)
     return fig
 
@@ -463,9 +462,9 @@ def tagger_cross_eval(cfg, level, seeds=None):
         return None
     long = pd.DataFrame(rows)
     pfx, sdir = io_utils.prefix(cfg), io_utils.summary_dir(cfg)
-    long.to_csv(os.path.join(sdir, f"{pfx}__tagger_2x3_runs__{level}.csv"), index=False)
+    long.to_csv(os.path.join(sdir, f"{pfx}_tagger-2x3-runs_{level}.csv"), index=False)
     table = _table_2x3(long, key, list(a_inputs))
-    table.to_csv(os.path.join(sdir, f"{pfx}__tagger_2x3__{level}.csv"))
+    table.to_csv(os.path.join(sdir, f"{pfx}_tagger-2x3_{level}.csv"))
     _plot_2x3(long, key, key_label, list(a_inputs), level, cfg)
     if "same_events" in long and not long["same_events"].fillna(True).all():
         print(f"  [{level}] some column-B runs predate the same-events change; retrain them for a fair table")
@@ -508,15 +507,14 @@ def _plot_2x3(long, key, key_label, row_order, level, cfg):
     ax.set_ylabel(f"tagger {key_label}")
     ax.set_title(f"{cfg['dataset']} {level}: tagger trained on HR (A) vs trained on each input (B)", fontsize=9)
     ax.legend(fontsize=8, frameon=False)
-    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}__tagger_2x3__{level}")
+    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}_tagger-2x3_{level}")
     plt.close(fig)
 
 
 # ---------------------------------------------------------------- summaries
 def _load_metrics(cfg, stage):
-    root = os.path.join(io_utils.dataset_root(cfg), "runs")
     out = []
-    for path in sorted(glob.glob(os.path.join(root, f"{io_utils.prefix(cfg)}__{stage}__*", "metrics.json"))):
+    for path in sorted(glob.glob(os.path.join(io_utils.run_glob(cfg, stage), "metrics.json"))):
         out.append((os.path.basename(os.path.dirname(path)), io_utils.load_json(path)))
     return out
 
@@ -562,21 +560,21 @@ def summarize(cfg):
         rows.append(row)
     if rows:
         tag = pd.DataFrame(rows)
-        tag.to_csv(os.path.join(sdir, f"{pfx}__tagger_runs.csv"), index=False)
+        tag.to_csv(os.path.join(sdir, f"{pfx}_tagger-runs.csv"), index=False)
         key = "auc" if ds == "qg" else "mean_binned_resolution"
         num = [c for c in tag.columns if tag[c].dtype.kind in "fi" and c not in ("seed", "n_train")]
         agg = tag.groupby(["method", "level"])[num].agg(["mean", "std"])
         agg.columns = [f"{a} ({'mean' if b == 'mean' else 'spread over seeds'})" for a, b in agg.columns]
         agg.insert(0, "n seeds", tag.groupby(["method", "level"])["seed"].nunique())
         agg = agg.reset_index()
-        agg.to_csv(os.path.join(sdir, f"{pfx}__tagger_summary.csv"), index=False)
+        agg.to_csv(os.path.join(sdir, f"{pfx}_tagger-summary.csv"), index=False)
         sections.append(("Downstream tagger / regressor on the test set. 'boot_err' is the uncertainty from "
                          "resampling the test set; 'spread over seeds' needs at least two seeds.", agg))
         _plot_tagger(tag, key, levels, fdir, ds, pfx)
         if ds == "calo":
             _plot_calo_resolution(cfg, fdir, pfx)
     for level in levels:
-        path = os.path.join(sdir, f"{pfx}__tagger_2x3__{level}.csv")
+        path = os.path.join(sdir, f"{pfx}_tagger-2x3_{level}.csv")
         if os.path.exists(path):
             sections.append((f"{level}: tagger {_tagger_key(cfg)[1]}, A = trained on HR only and applied to each "
                              "input (LR stretched back to the HR grid), B = trained and tested on each input",
@@ -584,23 +582,23 @@ def summarize(cfg):
 
     # SR observables
     frames = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(
-        io_utils.dataset_root(cfg), "runs", f"{pfx}__sreval__*", "observables.csv")))]
+        io_utils.run_glob(cfg, "sreval"), "observables.csv")))]
     if frames:
         obs = pd.concat(frames, ignore_index=True)
         obs["method"] = obs["method"].replace({"var": "srproj", "var-raw": "sr"})  # older runs
-        obs.to_csv(os.path.join(sdir, f"{pfx}__sr_observables.csv"), index=False)
+        obs.to_csv(os.path.join(sdir, f"{pfx}_sr-observables.csv"), index=False)
         for level in levels:
             t = values_table(obs, level)
             if t is not None:
-                t.to_csv(os.path.join(sdir, f"{pfx}__values__{level}.csv"))
+                t.to_csv(os.path.join(sdir, f"{pfx}_values_{level}.csv"))
                 sections.append((f"{level}: mean of each quantity for the truth, the coarse input and the "
                                  "super-resolved output (other columns are diagnostics)", t))
         pf = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(
-            io_utils.dataset_root(cfg), "runs", f"{pfx}__sreval__*", "paired.csv")))]
+            io_utils.run_glob(cfg, "sreval"), "paired.csv")))]
         pf = [p for p in pf if not p.empty]
         if pf:
             pair = pd.concat(pf, ignore_index=True)
-            pair.to_csv(os.path.join(sdir, f"{pfx}__paired.csv"), index=False)
+            pair.to_csv(os.path.join(sdir, f"{pfx}_paired.csv"), index=False)
             for level in levels:
                 s = pair[(pair["level"] == level) & (pair["role"] == "main")]
                 if not s.empty:
@@ -608,7 +606,7 @@ def summarize(cfg):
                     sections.append((f"{level}: event by event against HR. bias = mean(X - HR) / mean(HR), "
                                      "resolution = std(X - HR) / mean(HR), pearson_r = correlation", t))
         piv = obs.pivot_table(index="observable", columns=["level", "method"], values="w1_over_sigma")
-        piv.to_csv(os.path.join(sdir, f"{pfx}__sr_w1_table.csv"))
+        piv.to_csv(os.path.join(sdir, f"{pfx}_sr-w1-table.csv"))
         sections.append(("Distance to the HR distribution, W1 / sigma_HR (0 = identical)", piv))
         _plot_w1(obs, levels, fdir, ds, pfx)
 
@@ -622,7 +620,7 @@ def summarize(cfg):
             rows.append({"level": m["level"], "method": LEGACY_KINDS.get(meth.replace("-", ""), meth), **r})
     if rows:
         c = pd.DataFrame(rows).groupby(["level", "method"]).first().reset_index()
-        c.to_csv(os.path.join(sdir, f"{pfx}__c2st_closure.csv"), index=False)
+        c.to_csv(os.path.join(sdir, f"{pfx}_c2st-closure.csv"), index=False)
         sections.append(("Two-sample test AUC (0.5 = a CNN cannot tell it from HR) and LR closure "
                          "(sum|pool(SR) - LR| / sum LR; 0 = agrees with the coarse measurement)", c))
     _write_report(cfg, sections, sdir)
@@ -646,7 +644,7 @@ def _plot_tagger(tag, key, levels, fdir, ds, pfx):
     ax.set_xlabel("down-sampling level")
     ax.set_ylabel("tagger ROC AUC" if ds == "qg" else "energy resolution (mean over bins)")
     ax.legend(fontsize=8, frameon=False)
-    io_utils.save_figure(fig, fdir, f"{pfx}__tagger_{key}_vs_level")
+    io_utils.save_figure(fig, fdir, f"{pfx}_tagger-{key}-vs-level")
     plt.close(fig)
 
 
@@ -669,7 +667,7 @@ def _plot_calo_resolution(cfg, fdir, pfx):
         ax.set_xlabel("E_inc [GeV]")
         ax.set_ylabel("sigma_eff(E_pred/E_inc)")
     axes[0, 0].legend(fontsize=7, frameon=False)
-    io_utils.save_figure(fig, fdir, f"{pfx}__energy_resolution_vs_E")
+    io_utils.save_figure(fig, fdir, f"{pfx}_energy-resolution-vs-E")
     plt.close(fig)
 
 
@@ -692,7 +690,7 @@ def _plot_w1(obs, levels, fdir, ds, pfx):
                         color="w" if v > 1 else "k")
         fig.colorbar(im, ax=ax, label="log10(W1 / sigma_HR), lower is better")
         ax.set_title(f"{ds} {level}: distance to the HR distribution", fontsize=9)
-        io_utils.save_figure(fig, fdir, f"{pfx}__w1_heatmap__{level}")
+        io_utils.save_figure(fig, fdir, f"{pfx}_w1-heatmap_{level}")
         plt.close(fig)
 
 
@@ -706,10 +704,10 @@ def _md(df):
 
 def _write_report(cfg, sections, sdir):
     ds, pfx = cfg["dataset"], io_utils.prefix(cfg)
-    lines = [f"# {ds} super-resolution summary ({cfg.get('version', 'v1')}, {io_utils.run_id(cfg)})", "", f"generated {io_utils.now()}", "",
+    lines = [f"# {ds} super-resolution summary: {io_utils.experiment_name(cfg)}", "", f"generated {io_utils.now()}", "",
              "SR means the model output exactly as generated. Columns such as 'Uniform upsample', "
              "'SR + energy constraint' and 'Tokenizer only' are diagnostics.", ""]
     for title, t in sections:
         lines += [f"## {title}", "", _md(t), ""]
-    with open(os.path.join(sdir, f"{pfx}__report.md"), "w") as f:
+    with open(os.path.join(sdir, f"{pfx}_report.md"), "w") as f:
         f.write("\n".join(lines))

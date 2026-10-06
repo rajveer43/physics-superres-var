@@ -6,10 +6,10 @@ Cache (local disk, numpy memmaps, linear energies, float32):
     {split}_hr.npy        (N, C, *hr_shape)       zero-padded ground truth
     {split}_{level}.npy   (N, C, *hr_shape / f)   sum-pooled low resolution
     {split}_target.npy    (N,)                    qg: class label, calo: E_inc [MeV]
-    {split}_{tag}-sr-{decode}_{level}.npy     VAR output (written by generate); decode = greedy | sample
-    test_{tag}-vqrec_{level}.npy              tokenizer-only reconstruction (written by eval_sr)
+    {split}_{tag}_sr-{decode}_{level}.npy     VAR output (written by generate); decode = greedy | sample
+    test_{tag}_vqrec_{level}.npy              tokenizer-only reconstruction (written by eval_sr)
 
-Model outputs carry tag = {version}-{run_id}, so outputs of another model or experiment
+Model outputs carry tag = {dataset}_{version}_{run_date}_{run_tag} (e.g. qg_v2_2026-10-06_tokenizer-fix), so outputs of another model or experiment
 are never picked up by mistake; the HR / LR / target arrays are shared by all of them.
 
 Network inputs use x = log1p(E / (s_c * V)), where s_c is the mean non-zero
@@ -406,13 +406,13 @@ class CacheStore:
 
     def sr_path(self, split, level, decode="greedy"):
         """decode: 'greedy' (most likely token) or 'sample' (tokens drawn from the predicted distribution)."""
-        return self.path(split, f"{self.tag}-sr-{decode}_{level}")
+        return self.path(split, f"{self.tag}_sr-{decode}_{level}")
 
     def has_sr(self, split, level, decode="greedy"):
         return os.path.exists(self.sr_path(split, level, decode))
 
     def vqrec_path(self, split, level):
-        return self.path(split, f"{self.tag}-vqrec_{level}")
+        return self.path(split, f"{self.tag}_vqrec_{level}")
 
     def n_common(self, split, levels):
         """Events that HR and every generated SR output of `levels` have, so that taggers on

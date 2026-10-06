@@ -1,14 +1,14 @@
 """Optuna studies (TPE sampler + median pruner), resumable across Colab sessions.
 
-study (prefix = {ds}__{ver}__{run_id}, so each experiment has its own studies)
-                            objective (validation set)                                 direction
-{prefix}__vqvae__hr         MSE + median per-channel |dE/E| + |1 - predicted/true hits|  minimise
-{prefix}__var__all          next-scale token cross-entropy                             minimise
-{prefix}__tagger__hr        qg: ROC AUC / calo: mean binned resolution                 max / min
+study, in {experiment}/tuning/ (name = {dataset}_{version}_{date}_{tag}, so each experiment has its own)
+                                  objective (validation set)                                 direction
+{name}_vqvae_tokenizer            MSE + median per-channel |dE/E| + |1 - predicted/true hits|  minimise
+{name}_var_transformer_all        next-scale token cross-entropy                             minimise
+{name}_cnn_tagger_hr              qg: ROC AUC / calo: mean binned resolution                 max / min
 
 Trials use short schedules (optuna.trial_epochs) on a subset of the training
 data (optuna.trial_max_train); the best parameters are stored as dotted config
-overrides in *__best.json and picked up automatically by the full runs.
+overrides in *_best.json and picked up automatically by the full runs.
 """
 import os
 

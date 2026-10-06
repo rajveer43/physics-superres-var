@@ -101,7 +101,7 @@ Command-line alternative (for example on a cluster):
 
 ```bash
 pip install -r requirements.txt
-python -m superres.pipeline --dataset calo --stages all --set paths.drive_root=/path/experiments run_id=2026-10-05-tokfix
+python -m superres.pipeline --dataset calo --stages all --set paths.drive_root=/path/experiments run_date=2026-10-06 run_tag=tokenizer-fix
 python -m superres.pipeline --dataset qg --stages train_var,generate --levels pool8x8 --set var.epochs=20
 python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-end check
 ```
@@ -112,60 +112,62 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 |---|---|---|
 | `download` | Zenodo (calo, md5-checked) or CERNBox share over WebDAV (qg); resumable `wget -c` | `/content/data/raw/<ds>/` |
 | `prepare` | Pad, clip negatives, sum-pool to every LR level, split into train/val/test, per-channel energy scale | `/content/data/cache/<ds>/*.npy`, `data_meta.json` on Drive |
-| `tune_vqvae` | Optuna: lr, codebook size, latent channels, β, energy weight, width | `optuna/<prefix>__vqvae__hr*` |
-| `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `runs/<prefix>__vqvae__hr__s42/` |
-| `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `optuna/<prefix>__var__all*` |
-| `train_var` | One conditional VAR per LR level | `runs/<prefix>__var__<level>__s42/` |
-| `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `/content/data/cache/<ds>/*_<ver>-<run_id>-sr-<decode>_<level>.npy` |
-| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `runs/<prefix>__sreval__<level>/` |
-| `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `optuna/<prefix>__tagger__hr*` |
-| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `runs/<prefix>__tagger__<input>__s<seed>/` |
+| `tune_vqvae` | Optuna: lr, codebook size, latent channels, β, energy weight, width | `tuning/<name>_vqvae_tokenizer*` |
+| `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `models/vqvae_tokenizer/` |
+| `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `tuning/<name>_var_transformer_all*` |
+| `train_var` | One conditional VAR per LR level | `models/var_transformer_<level>/` |
+| `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `<cache>/<ds>/<split>_<name>_sr-<decode>_<level>.npy` |
+| `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `evaluation/sr_<level>/` |
+| `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `tuning/<name>_cnn_tagger_hr*` |
+| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `models/cnn_tagger_<input>_seed<seed>/` (calo: `cnn_regressor_…`) |
 | `summarize` | Tables, plots and a markdown report across all runs | `summary/` |
 
 Every training stage resumes from `last.pt` on Drive. Optuna studies resume from
 their database copy on Drive. After a disconnect, re-run the notebook from the top.
 
-### Result layout and naming on Drive
+### Result layout and naming
 
 ```
-MyDrive/GSoC_SuperRes/
-  smoke_tests/                        same layout as experiments/, for SMOKE / FAKE_DATA runs
-  experiments/                        (v1 results stay in MyDrive/superres_results/)
-   <dataset>/<version>/<run_id>/      one experiment, e.g. qg/v2/2026-10-05-tokfix/
+<drive_root>/                         Colab: MyDrive/GSoC_SuperRes/experiments, Perlmutter: $SCRATCH/superres/experiments
+  <dataset>/<date>_<version>_<tag>/   one experiment, e.g. qg/2026-10-06_v2_tokenizer-fix/
       README_layout.md
-      run_info.json                   start time; per session: commit, GPU, full config
+      run_info.json                   start time; per session: commit, GPU / job id, full config
       data_meta.json                  shapes, splits, energy scales, label counts
-      runs/<prefix>__<stage>__<variant>__s<seed>/
-          config.json                 full config + creation time
-          history.csv                 one row per epoch
-          metrics.json                final / test metrics
-          best.pt  last.pt            checkpoints (last.pt = resume point)
-          test_predictions.npz        taggers only
-          figures/<run>__training_curves.png|pdf     every training run, updated each epoch
-          observables.csv             sreval only
-          figures/  figures/diagnostics/            sreval only: histograms, profiles,
-                                      example events, per-channel events (png + pdf)
-      optuna/<prefix>__<stage>__<variant>.db | __trials.csv | __best.json
+      models/
+          vqvae_tokenizer/            multi-scale VQ-VAE
+          var_transformer_<level>/    conditional VAR, one per LR level
+          cnn_tagger_<input>_seed<seed>/      qg quark/gluon tagger (calo: cnn_regressor_...)
+              config.json  history.csv  metrics.json  best.pt  last.pt (resume point)
+              test_predictions.npz                    taggers only
+              figures/<name>_<model>_training-curves.png|pdf   updated each epoch
+      evaluation/
+          sr_<level>/                 observables.csv, paired.csv, metrics.json,
+              figures/  figures/diagnostics/          histograms, scatter plots, profiles,
+                                                      example events, per-channel events (png + pdf)
+      tuning/<name>_<model>.db | _trials.csv | _best.json          Optuna studies
       summary/
-          <prefix>__tagger_runs.csv     one row per tagger run
-          <prefix>__tagger_summary.csv  mean and std over seeds
-          <prefix>__sr_observables.csv  all observable comparisons
-          <prefix>__values__<level>.csv mean of each quantity: HR | LR | SR | diagnostics
-          <prefix>__sr_w1_table.csv     observable x (level, method) W1 table
-          <prefix>__c2st_closure.csv    two-sample-test AUC and LR closure
-          <prefix>__report.md           all tables in one page
-          figures/                    AUC or resolution vs level, W1 heatmaps, resolution vs E
+          <name>_report.md            all tables in one page
+          <name>_tagger-runs.csv      one row per tagger run
+          <name>_tagger-summary.csv   mean and std over seeds
+          <name>_tagger-2x3_<level>.csv   tagger trained on HR vs trained on each input
+          <name>_sr-observables.csv   all observable comparisons
+          <name>_paired.csv           event-by-event bias / resolution / correlation
+          <name>_values_<level>.csv   mean of each quantity: HR | LR | SR | diagnostics
+          <name>_sr-w1-table.csv      observable x (level, method) W1 table
+          <name>_c2st-closure.csv     two-sample-test AUC and LR closure
+          figures/                    tagger curves, 2x3 table, AUC vs level, W1 heatmaps
 ```
 
-- `<prefix>` = `<dataset>__<version>__<run_id>`, e.g. `qg__v2__2026-10-05-tokfix`.
+- `<name>` = `<dataset>_<version>_<date>_<tag>`, e.g. `qg_v2_2026-10-06_tokenizer-fix`, starts every
+  file name, so a figure copied elsewhere still says which experiment it is from. `_` separates
+  fields and `-` joins words inside a field.
 - `version` comes from `config.py` (`"version": "v2"`): change it for a new model design.
-- `run_id` = start date + short tag, one per experiment (set in the notebook with
-  `RUN_TAG` / `RUN_DATE`). Reuse it to resume or re-evaluate; a new one starts from
-  scratch and has its own Optuna studies. Nothing from another experiment is overwritten,
-  and SR outputs in the local cache carry `<version>-<run_id>` too.
-- `stage` is one of `vqvae`, `var`, `sreval` or `tagger`.
-- `variant` is the input or level, e.g. `hr`, `pool4x4`, `lr-pool4x4` or
-  `sr-pool4x4`.
+- `run_date` (start date) and `run_tag` (what the experiment tests, e.g. `tokenizer-fix`) name the
+  experiment. Reuse both to resume or re-evaluate; a new date or tag starts from scratch and has its
+  own Optuna studies. SR outputs in the shared local cache carry `<name>` too.
+- `<input>` is `hr`, `lr-<level>`, `sr-<level>`, `uniform-<level>` or `srproj-<level>`.
+- The Colab notebook pulls branch `v2-eval-tagger-checks`, which still uses the previous naming
+  (`<dataset>/<version>/<date>-<tag>/runs/...`).
 - Names contain no timestamps, so later stages can find earlier outputs. The
   creation time is stored in `config.json` instead.
 
@@ -196,6 +198,11 @@ Not measured yet. Run the smoke pass first; the epoch times it prints in
   5 should fit in a Colab session.
 - Stages are independent, so they can run across several sessions.
 - On an A100 or L4 the code uses bf16 automatically.
+
+## Running on Perlmutter (NERSC)
+
+`slurm/` runs the same stages as a chain of single-GPU Slurm jobs (levels, tagger inputs and seeds in
+parallel), configured by one file, `slurm/settings.sh`. Step-by-step instructions: [README_PERLMUTTER.md](README_PERLMUTTER.md).
 
 ## Assumptions to check on the first real run
 

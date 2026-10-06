@@ -1,26 +1,29 @@
-"""Result layout on Google Drive and small I/O helpers.
+"""Result layout and small I/O helpers.
 
 Layout (all names are stable, so later stages can find earlier outputs):
 
-    {drive_root}/                        e.g. MyDrive/GSoC_SuperRes/experiments
+    {drive_root}/                              e.g. MyDrive/GSoC_SuperRes/experiments or $SCRATCH/superres/experiments
       {dataset}/
-        {version}/                       e.g. v2; one folder per model version
-          {run_id}/                      one experiment: start date + tag, e.g. 2026-10-05-tokfix
-            README_layout.md
-            run_info.json                start time, git commit, GPU, config of every session
-            data_meta.json
-            runs/{dataset}__{version}__{run_id}__{stage}__{variant}__s{seed}/
-                config.json  history.csv  metrics.json  best.pt  last.pt
-                figures/      training curves (*__training_curves), and for sreval runs the
-                              observable histograms, profiles, example events and per-channel events
-                figures/diagnostics/   the same with diagnostic methods added
-            optuna/{prefix}__{stage}__{variant}.db / __trials.csv / __best.json
-            summary/{prefix}__*.csv|md  summary/figures/*.png|pdf
+        {date}_{version}_{tag}/                one experiment, e.g. 2026-10-06_v2_tokenizer-fix
+          README_layout.md
+          run_info.json                        start time, git commit, GPU, config of every session
+          data_meta.json                       which events were cached (counts, scales, source files)
+          models/
+            vqvae_tokenizer/                   multi-scale VQ-VAE (one per experiment)
+            var_transformer_{level}/           conditional VAR, one per LR level, e.g. var_transformer_pool2x2
+            cnn_tagger_{input}_seed{seed}/     qg quark/gluon tagger, e.g. cnn_tagger_sr-pool2x2_seed42
+            cnn_regressor_{input}_seed{seed}/  calo incident-energy regressor
+                config.json  history.csv  metrics.json  best.pt  last.pt  figures/
+          evaluation/
+            sr_{level}/                        physics observables, paired.csv, metrics.json, figures/
+                figures/diagnostics/           the same with diagnostic methods added
+          tuning/                              Optuna studies: {name}.db, {name}_trials.csv, {name}_best.json
+          summary/                             {name}_report.md, tables (*.csv), figures/
 
-prefix  : {dataset}__{version}__{run_id}, the start of every run, figure and table name
-
-stage   : vqvae | var | sreval | tagger
-variant : hr | pool4x4 | lr-pool4x4 | sr-pool4x4 | uniform-pool4x4 | srproj-pool4x4
+name    : {dataset}_{version}_{date}_{tag}, e.g. qg_v2_2026-10-06_tokenizer-fix. Every file name starts with it
+          (figures: {name}_{model or level}_{what}.png), so a file copied elsewhere still says where it is from.
+          '_' separates fields, '-' joins words inside a field.
+input   : hr | lr-{level} | sr-{level} | uniform-{level} | srproj-{level}
 Every figure is written as .png and .pdf.
 """
 import csv
@@ -39,23 +42,69 @@ def slug(s):
     return re.sub(r"[^A-Za-z0-9.\-]+", "-", str(s)).strip("-")
 
 
-def run_id(cfg):
-    return slug(cfg.get("run_id") or "untagged")
+def run_date(cfg):
+    return slug(cfg.get("run_date") or "undated")
+
+
+def run_tag(cfg):
+    return slug(cfg.get("run_tag") or "untagged")
+
+
+def version(cfg):
+    return slug(cfg.get("version", "v1"))
+
+
+def experiment_name(cfg):
+    """{date}_{version}_{tag}: the experiment folder, e.g. 2026-10-06_v2_tokenizer-fix."""
+    return f"{run_date(cfg)}_{version(cfg)}_{run_tag(cfg)}"
 
 
 def prefix(cfg):
-    """{dataset}__{version}__{run_id}: the start of every run, figure and table name."""
-    return f"{slug(cfg['dataset'])}__{slug(cfg.get('version', 'v1'))}__{run_id(cfg)}"
+    """{dataset}_{version}_{date}_{tag}: the start of every file name, e.g. qg_v2_2026-10-06_tokenizer-fix."""
+    return f"{slug(cfg['dataset'])}_{version(cfg)}_{run_date(cfg)}_{run_tag(cfg)}"
 
 
 def model_tag(cfg):
-    """{version}-{run_id}: marks model outputs in the local cache."""
-    return f"{slug(cfg.get('version', 'v1'))}-{run_id(cfg)}"
+    """Marks this experiment's model outputs in the shared local cache."""
+    return prefix(cfg)
 
 
-def run_name(cfg, stage, variant, seed=None):
-    parts = [stage, variant] + ([f"s{seed}"] if seed is not None else [])
-    return "__".join([prefix(cfg)] + [slug(p) for p in parts])
+# stage -> (group folder, model name)
+_RUNS = {"vqvae": ("models", "vqvae_tokenizer"), "var": ("models", "var_transformer"),
+         "tagger": ("models", None), "sreval": ("evaluation", "sr")}
+
+
+def _tagger_name(cfg):
+    return "cnn_tagger" if cfg.get("tagger", {}).get("task", "classification") == "classification" else "cnn_regressor"
+
+
+def run_folder(cfg, stage, variant=None, seed=None):
+    """Folder name of one trained model or evaluation, e.g. var_transformer_pool2x2, cnn_tagger_hr_seed42.
+    The tokenizer and the transformers are trained once per experiment (config seed), so their names
+    carry no seed; taggers are trained with several seeds."""
+    group, name = _RUNS[stage]
+    name = name or _tagger_name(cfg)
+    if stage != "vqvae" and variant:
+        name += f"_{slug(variant)}"
+    if stage == "tagger" and seed is not None:
+        name += f"_seed{seed}"
+    return name
+
+
+def run_path(cfg, stage, variant=None, seed=None):
+    """Where a run lives, without creating it."""
+    return os.path.join(experiment_root(cfg), _RUNS[stage][0], run_folder(cfg, stage, variant, seed))
+
+
+def run_glob(cfg, stage):
+    """Glob pattern matching every run of a stage in this experiment."""
+    group, name = _RUNS[stage]
+    return os.path.join(experiment_root(cfg), group, (name or _tagger_name(cfg)) + "*")
+
+
+def run_name(cfg, stage, variant=None, seed=None):
+    """Full label of a run: {prefix}_{folder}, e.g. qg_v2_2026-10-06_tokenizer-fix_cnn_tagger_hr_seed42."""
+    return f"{prefix(cfg)}_{run_folder(cfg, stage, variant, seed)}"
 
 
 def now():
@@ -76,7 +125,7 @@ def _jsonable(o):
 
 def save_json(path, obj):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"  # per process: parallel jobs may write the same file
     with open(tmp, "w") as f:
         json.dump(obj, f, indent=2, default=_jsonable)
     os.replace(tmp, path)
@@ -88,8 +137,8 @@ def load_json(path):
 
 
 def experiment_root(cfg):
-    """{drive_root}/{dataset}/{version}/{run_id}: everything one experiment writes."""
-    root = os.path.join(cfg["paths"]["drive_root"], cfg["dataset"], slug(cfg.get("version", "v1")), run_id(cfg))
+    """{drive_root}/{dataset}/{date}_{version}_{tag}: everything one experiment writes."""
+    root = os.path.join(cfg["paths"]["drive_root"], cfg["dataset"], experiment_name(cfg))
     os.makedirs(root, exist_ok=True)
     readme = os.path.join(root, "README_layout.md")
     if not os.path.exists(readme):
@@ -105,7 +154,7 @@ def save_run_info(cfg, **session):
     """run_info.json: when the experiment started, plus one entry per session (code commit, GPU, config)."""
     path = os.path.join(experiment_root(cfg), "run_info.json")
     info = load_json(path) if os.path.exists(path) else {
-        "experiment": prefix(cfg), "started": now(), "sessions": []}
+        "experiment": experiment_name(cfg), "name": prefix(cfg), "started": now(), "sessions": []}
     info["sessions"].append({"time": now(), **session, "config": cfg})
     save_json(path, info)
     return info
@@ -121,7 +170,7 @@ class RunDir:
     def __init__(self, cfg, stage, variant, seed=None):
         self.cfg = cfg
         self.name = run_name(cfg, stage, variant, seed)
-        self.path = os.path.join(dataset_root(cfg), "runs", self.name)
+        self.path = run_path(cfg, stage, variant, seed)
         self.fig_dir = os.path.join(self.path, "figures")
         os.makedirs(self.fig_dir, exist_ok=True)
 
@@ -152,7 +201,7 @@ class RunDir:
             w.writerow(row)
 
     def plot_history(self, groups):
-        """Training curves from history.csv -> figures/{run}__training_curves.png|pdf.
+        """Training curves from history.csv -> figures/{run name}_training-curves.png|pdf.
         groups: list of (panel title, [columns]); columns missing from the history are skipped."""
         path = self.file("history.csv")
         if not os.path.exists(path):
@@ -175,13 +224,13 @@ class RunDir:
             ax.legend(fontsize=7, frameon=False)
         fig.suptitle(self.name, fontsize=9)
         fig.tight_layout()
-        save_figure(fig, self.fig_dir, f"{self.name}__training_curves")
+        save_figure(fig, self.fig_dir, f"{self.name}_training-curves")
         plt.close(fig)
 
 
 def study_paths(cfg, stage, variant):
-    name = run_name(cfg, stage, variant)
-    drive_dir = os.path.join(dataset_root(cfg), "optuna")
+    name = run_name(cfg, stage, variant)  # e.g. ..._var_transformer_all, ..._cnn_tagger_hr
+    drive_dir = os.path.join(dataset_root(cfg), "tuning")
     local_dir = os.path.join(cfg["paths"]["cache_root"], "optuna", model_tag(cfg))
     os.makedirs(drive_dir, exist_ok=True)
     os.makedirs(local_dir, exist_ok=True)
@@ -191,8 +240,8 @@ def study_paths(cfg, stage, variant):
         # local and copied to Drive after every trial.
         "db_local": os.path.join(local_dir, name + ".db"),
         "db_drive": os.path.join(drive_dir, name + ".db"),
-        "trials_csv": os.path.join(drive_dir, name + "__trials.csv"),
-        "best_json": os.path.join(drive_dir, name + "__best.json"),
+        "trials_csv": os.path.join(drive_dir, name + "_trials.csv"),
+        "best_json": os.path.join(drive_dir, name + "_best.json"),
     }
 
 

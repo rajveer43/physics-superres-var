@@ -13,14 +13,16 @@ ZENODO_RECORD = "6366271"
 CALO_R_EDGES = [0.0, 4.65, 9.3, 13.95, 18.6, 27.9, 37.2, 46.5, 55.8, 65.1]
 
 BASE = {
-    # Results go to {drive_root}/{dataset}/{version}/{run_id}/ and every run, figure and table name
-    # starts with {dataset}__{version}__{run_id}, so no experiment overwrites or mixes with another.
+    # Results go to {drive_root}/{dataset}/{run_date}_{version}_{run_tag}/ and every file name starts
+    # with {dataset}_{version}_{run_date}_{run_tag}, so no experiment overwrites or mixes with another.
     # v1: single-head decoder, 16x16 latent, total-energy loss.
     # v2: hit/energy decoder heads, LR image into the decoder, 32x32 latent, per-channel energy loss.
     "version": "v2",
-    # One experiment = one training campaign: start date + short tag, e.g. "2026-10-05-tokfix".
-    # Keep the same run_id to resume or re-evaluate it; a new run_id starts from scratch.
-    "run_id": None,
+    # One experiment = one training campaign: its start date (YYYY-MM-DD) and a descriptive tag,
+    # e.g. run_date "2026-10-06", run_tag "tokenizer-fix" -> experiment 2026-10-06_v2_tokenizer-fix.
+    # Keep both to resume or re-evaluate an experiment; a new date or tag starts from scratch.
+    "run_date": None,
+    "run_tag": None,
     "seed": 42,
     "num_workers": 2,
     "amp": True,
