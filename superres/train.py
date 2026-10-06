@@ -1,6 +1,7 @@
 """Training loops: multi-scale VQ-VAE, conditional VAR, SR generation, taggers."""
 import math
 import os
+import sys
 import time
 
 import numpy as np
@@ -49,8 +50,12 @@ class Amp:
 
 
 def loader(ds, bs, shuffle, cfg, drop_last=False):
+    workers = cfg["num_workers"]
+    # Linux: fork the workers so they share the memory-mapped arrays instead of each getting a pickled
+    # copy (newer Pythons no longer fork by default). Elsewhere keep the platform default.
+    ctx = "fork" if workers and sys.platform.startswith("linux") else None
     return DataLoader(ds, batch_size=bs, shuffle=shuffle, drop_last=drop_last and len(ds) > bs,
-                      num_workers=cfg["num_workers"], pin_memory=torch.cuda.is_available())
+                      num_workers=workers, pin_memory=torch.cuda.is_available(), multiprocessing_context=ctx)
 
 
 def set_lr(opt, step, total, base, warmup):

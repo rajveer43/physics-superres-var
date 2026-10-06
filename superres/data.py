@@ -16,6 +16,7 @@ Network inputs use x = log1p(E / (s_c * V)), where s_c is the mean non-zero
 cell energy of channel c and V the number of fine cells merged into one cell
 (V = 1 at high resolution). This keeps LR and HR inputs on the same scale.
 """
+import functools
 import glob
 import json
 import math
@@ -366,6 +367,10 @@ class _Lazy:
         return out[0] if single else out
 
 
+def _same(a):
+    return a
+
+
 def parse_kind(kind):
     method, _, level = kind.partition(":")
     return method, (level or None)
@@ -448,19 +453,19 @@ class CacheStore:
         if method == "hr":
             return self._mm(split, "hr")
         if method == "vqrec":  # tokenizer-only reconstruction of HR (written by evaluate)
-            return _Lazy(lambda a: a, np.load(self.vqrec_path(split, level), mmap_mode="r"))
+            return _Lazy(_same, np.load(self.vqrec_path(split, level), mmap_mode="r"))
         f = self.levels[level]
         lr = self._mm(split, level)
         if method == "lr":
             return lr
         if method == "uniform":
-            return _Lazy(lambda a: uniform_upsample(a, f), lr)
+            return _Lazy(functools.partial(uniform_upsample, f=f), lr)
         if method not in ("sr", "srproj", "srsample", "srgreedy"):
             raise ValueError(f"unknown kind {kind}")
         sr = np.load(self.sr_path(split, level, self.sr_decode(method)), mmap_mode="r")
         if method == "srproj":  # SR with every coarse cell forced back to its measured energy
-            return _Lazy(lambda a, b: project_to_lr(a, b, f), sr, lr)
-        return _Lazy(lambda a: a, sr)  # the model output as generated
+            return _Lazy(functools.partial(project_to_lr, f=f), sr, lr)
+        return _Lazy(_same, sr)  # the model output as generated
 
 
 class SRDataset(Dataset):
