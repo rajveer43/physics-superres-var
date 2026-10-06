@@ -78,20 +78,20 @@ bash slurm/submit_all.sh             # submits the whole chain with dependencies
 bash slurm/status.sh                 # queue, what is finished, end of each log; run it any time
 ```
 
-- The experiment is named `<date>_<version>_<tag>`, e.g. `2026-10-06_v2_tokenizer-fix`. The submit command fixes
+- The experiment is named `<date>_<version>_<tag>`, e.g. `2026-10-06_v2_multiseed`. The submit command fixes
   the name and freezes the settings into `$SCRATCH/superres/logs/<experiment>/run.env`, so changing `settings.sh`
   afterwards does not affect jobs that are already queued.
 - Logs: `$SCRATCH/superres/logs/<experiment>/<stage>-<jobid>[_<task>].out`. The list of submitted jobs is in `jobs.tsv` there.
 - Results: `$SCRATCH/superres/experiments/qg/<experiment>/`:
 
   ```
-  2026-10-06_v2_tokenizer-fix/
+  2026-10-06_v2_multiseed/
     run_info.json                         every job: id, node, GPU, code version, full config
     models/vqvae_tokenizer/               the tokenizer
     models/var_transformer_pool2x2/       the transformer for each level
     models/cnn_tagger_sr-pool2x2_seed42/  the taggers: input (hr, lr-<level>, sr-<level>) and seed
     evaluation/sr_pool2x2/                physics comparison of each level
-    summary/qg_v2_2026-10-06_tokenizer-fix_report.md   the report, with tables and figures next to it
+    summary/qg_v2_2026-10-06_multiseed_report.md   the report, with tables and figures next to it
   ```
 - If a job fails, the jobs that depend on it are cancelled automatically (`--kill-on-invalid-dep`).
 
@@ -106,7 +106,7 @@ bash slurm/status.sh                 # queue, what is finished, end of each log;
 
    Keep `RUN_DATE` empty if you re-submit the same day. On a later day, set `RUN_DATE` in `settings.sh` to the
    experiment's date (e.g. `2026-10-06`), so the jobs continue the same experiment instead of starting a new one.
-   `bash slurm/status.sh <experiment>` shows any experiment, e.g. `bash slurm/status.sh 2026-10-06_v2_tokenizer-fix`.
+   `bash slurm/status.sh <experiment>` shows any experiment, e.g. `bash slurm/status.sh 2026-10-06_v2_multiseed`.
 
 What happens to unfinished work on a re-submit:
 
@@ -129,7 +129,7 @@ bash slurm/pack_results.sh                     # tables, figures, metrics, confi
 bash slurm/pack_results.sh --with-checkpoints  # also the trained models (*.pt), much larger
 ```
 
-The tarball is `$SCRATCH/superres/results_<dataset>_<version>_<date>_<tag>.tar.gz`, e.g. `results_qg_v2_2026-10-06_tokenizer-fix.tar.gz` (and in `CFS_COPY` if set).
+The tarball is `$SCRATCH/superres/results_<dataset>_<version>_<date>_<tag>.tar.gz`, e.g. `results_qg_v2_2026-10-06_multiseed.tar.gz` (and in `CFS_COPY` if set).
 Send it with Globus, or tell me the CFS path. **`$SCRATCH` deletes files that haven't been used for 8 weeks**,
 so copy anything worth keeping.
 

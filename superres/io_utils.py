@@ -4,7 +4,7 @@ Layout (all names are stable, so later stages can find earlier outputs):
 
     {drive_root}/                              e.g. MyDrive/GSoC_SuperRes/experiments or $SCRATCH/superres/experiments
       {dataset}/
-        {date}_{version}_{tag}/                one experiment, e.g. 2026-10-06_v2_tokenizer-fix
+        {date}_{version}_{tag}/                one experiment, e.g. 2026-10-06_v2_multiseed
           README_layout.md
           run_info.json                        start time, git commit, GPU, config of every session
           data_meta.json                       which events were cached (counts, scales, source files)
@@ -20,7 +20,7 @@ Layout (all names are stable, so later stages can find earlier outputs):
           tuning/                              Optuna studies: {name}.db, {name}_trials.csv, {name}_best.json
           summary/                             {name}_report.md, tables (*.csv), figures/
 
-name    : {dataset}_{version}_{date}_{tag}, e.g. qg_v2_2026-10-06_tokenizer-fix. Every file name starts with it
+name    : {dataset}_{version}_{date}_{tag}, e.g. qg_v2_2026-10-06_multiseed. Every file name starts with it
           (figures: {name}_{model or level}_{what}.png), so a file copied elsewhere still says where it is from.
           '_' separates fields, '-' joins words inside a field.
 input   : hr | lr-{level} | sr-{level} | uniform-{level} | srproj-{level}
@@ -55,12 +55,12 @@ def version(cfg):
 
 
 def experiment_name(cfg):
-    """{date}_{version}_{tag}: the experiment folder, e.g. 2026-10-06_v2_tokenizer-fix."""
+    """{date}_{version}_{tag}: the experiment folder, e.g. 2026-10-06_v2_multiseed."""
     return f"{run_date(cfg)}_{version(cfg)}_{run_tag(cfg)}"
 
 
 def prefix(cfg):
-    """{dataset}_{version}_{date}_{tag}: the start of every file name, e.g. qg_v2_2026-10-06_tokenizer-fix."""
+    """{dataset}_{version}_{date}_{tag}: the start of every file name, e.g. qg_v2_2026-10-06_multiseed."""
     return f"{slug(cfg['dataset'])}_{version(cfg)}_{run_date(cfg)}_{run_tag(cfg)}"
 
 
@@ -103,7 +103,7 @@ def run_glob(cfg, stage):
 
 
 def run_name(cfg, stage, variant=None, seed=None):
-    """Full label of a run: {prefix}_{folder}, e.g. qg_v2_2026-10-06_tokenizer-fix_cnn_tagger_hr_seed42."""
+    """Full label of a run: {prefix}_{folder}, e.g. qg_v2_2026-10-06_multiseed_cnn_tagger_hr_seed42."""
     return f"{prefix(cfg)}_{run_folder(cfg, stage, variant, seed)}"
 
 

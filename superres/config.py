@@ -19,7 +19,7 @@ BASE = {
     # v2: hit/energy decoder heads, LR image into the decoder, 32x32 latent, per-channel energy loss.
     "version": "v2",
     # One experiment = one training campaign: its start date (YYYY-MM-DD) and a descriptive tag,
-    # e.g. run_date "2026-10-06", run_tag "tokenizer-fix" -> experiment 2026-10-06_v2_tokenizer-fix.
+    # e.g. run_date "2026-10-06", run_tag "multiseed" -> experiment 2026-10-06_v2_multiseed.
     # Keep both to resume or re-evaluate an experiment; a new date or tag starts from scratch.
     "run_date": None,
     "run_tag": None,

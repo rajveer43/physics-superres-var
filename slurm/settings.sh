@@ -11,9 +11,9 @@ GPU_MEM=40                    # 40 | 80 (80 GB A100s are fewer, so they may queu
 # ---- what to run ---------------------------------------------------------------------------------
 DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2)
 VERSION=v2
-RUN_TAG=tokenizer-fix         # what this experiment tests, in words joined by '-' (letters, digits, '-', '.')
+RUN_TAG=multiseed             # what this experiment tests, in words joined by '-' (letters, digits, '-', '.')
 RUN_DATE=                     # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-06 to resume one
-                              # -> experiment folder <RUN_DATE>_<VERSION>_<RUN_TAG>, e.g. 2026-10-06_v2_tokenizer-fix
+                              # -> experiment folder <RUN_DATE>_<VERSION>_<RUN_TAG>, e.g. 2026-10-06_v2_multiseed
 LEVELS="pool2x2"              # space separated, e.g. "pool2x2 pool4x4 pool8x8"
 SEEDS="42 43 44"              # tagger seeds
 TUNE=0                        # 1 = Optuna studies before the tokenizer, transformer and tagger

@@ -9,7 +9,7 @@ Cache (local disk, numpy memmaps, linear energies, float32):
     {split}_{tag}_sr-{decode}_{level}.npy     VAR output (written by generate); decode = greedy | sample
     test_{tag}_vqrec_{level}.npy              tokenizer-only reconstruction (written by eval_sr)
 
-Model outputs carry tag = {dataset}_{version}_{run_date}_{run_tag} (e.g. qg_v2_2026-10-06_tokenizer-fix), so outputs of another model or experiment
+Model outputs carry tag = {dataset}_{version}_{run_date}_{run_tag} (e.g. qg_v2_2026-10-06_multiseed), so outputs of another model or experiment
 are never picked up by mistake; the HR / LR / target arrays are shared by all of them.
 
 Network inputs use x = log1p(E / (s_c * V)), where s_c is the mean non-zero

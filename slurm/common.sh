@@ -23,7 +23,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 # For scripts run by hand after submission: load the frozen settings of one experiment.
 #   load_experiment ""         the most recently submitted one
-#   load_experiment <name>     that one, e.g. 2026-10-06_v2_tokenizer-fix
+#   load_experiment <name>     that one, e.g. 2026-10-06_v2_multiseed
 #   load_experiment --smoke    the most recent smoke test
 load_experiment() {
     local logs="$ROOT/logs" id="${1:-}" env_file

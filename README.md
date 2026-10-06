@@ -101,7 +101,7 @@ Command-line alternative (for example on a cluster):
 
 ```bash
 pip install -r requirements.txt
-python -m superres.pipeline --dataset calo --stages all --set paths.drive_root=/path/experiments run_date=2026-10-06 run_tag=tokenizer-fix
+python -m superres.pipeline --dataset calo --stages all --set paths.drive_root=/path/experiments run_date=2026-10-06 run_tag=multiseed
 python -m superres.pipeline --dataset qg --stages train_var,generate --levels pool8x8 --set var.epochs=20
 python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-end check
 ```
@@ -129,7 +129,7 @@ their database copy on Drive. After a disconnect, re-run the notebook from the t
 
 ```
 <drive_root>/                         Colab: MyDrive/GSoC_SuperRes/experiments, Perlmutter: $SCRATCH/superres/experiments
-  <dataset>/<date>_<version>_<tag>/   one experiment, e.g. qg/2026-10-06_v2_tokenizer-fix/
+  <dataset>/<date>_<version>_<tag>/   one experiment, e.g. qg/2026-10-06_v2_multiseed/
       README_layout.md
       run_info.json                   start time; per session: commit, GPU / job id, full config
       data_meta.json                  shapes, splits, energy scales, label counts
@@ -158,11 +158,11 @@ their database copy on Drive. After a disconnect, re-run the notebook from the t
           figures/                    tagger curves, 2x3 table, AUC vs level, W1 heatmaps
 ```
 
-- `<name>` = `<dataset>_<version>_<date>_<tag>`, e.g. `qg_v2_2026-10-06_tokenizer-fix`, starts every
+- `<name>` = `<dataset>_<version>_<date>_<tag>`, e.g. `qg_v2_2026-10-06_multiseed`, starts every
   file name, so a figure copied elsewhere still says which experiment it is from. `_` separates
   fields and `-` joins words inside a field.
 - `version` comes from `config.py` (`"version": "v2"`): change it for a new model design.
-- `run_date` (start date) and `run_tag` (what the experiment tests, e.g. `tokenizer-fix`) name the
+- `run_date` (start date) and `run_tag` (what the experiment tests, e.g. `multiseed`) name the
   experiment. Reuse both to resume or re-evaluate; a new date or tag starts from scratch and has its
   own Optuna studies. SR outputs in the shared local cache carry `<name>` too.
 - `<input>` is `hr`, `lr-<level>`, `sr-<level>`, `uniform-<level>` or `srproj-<level>`.

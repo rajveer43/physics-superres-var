@@ -2,7 +2,7 @@
 # Progress of one experiment: queued / running jobs, what is finished, and the end of the latest logs.
 #
 #   bash slurm/status.sh                 the most recently submitted experiment
-#   bash slurm/status.sh <experiment>    a given one, e.g. 2026-10-06_v2_tokenizer-fix
+#   bash slurm/status.sh <experiment>    a given one, e.g. 2026-10-06_v2_multiseed
 #   bash slurm/status.sh --smoke         the latest smoke test
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
