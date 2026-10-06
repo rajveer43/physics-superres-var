@@ -60,7 +60,7 @@ This loads the NERSC `pytorch` module, installs the few missing packages (optuna
 that module's user site (kept between sessions), and checks that the code imports. It should end with
 `superres imports ok` and `setup done`.
 
-## 4. Smoke test (about 15 minutes, debug queue)
+## 4. Smoke test (up to 30 minutes, debug queue)
 
 ```bash
 bash slurm/submit_all.sh --smoke
@@ -104,8 +104,9 @@ bash slurm/status.sh                 # queue, what is finished, end of each log;
    bash slurm/submit_all.sh --from var        # stages: prepare vqvae var generate eval taggers summary
    ```
 
-   Keep `RUN_DATE` empty if you re-submit the same day. On a later day, set `RUN_DATE` in `settings.sh` to the
-   experiment's date (e.g. `2026-10-06`), so the jobs continue the same experiment instead of starting a new one.
+   A restart with `--from` continues the most recent experiment with the same `RUN_TAG`, even on a later day
+   (it prints which one). To continue a different one, set `RUN_DATE` in `settings.sh` to its date
+   (e.g. `2026-10-06`). Without `--from`, an empty `RUN_DATE` starts a new experiment dated today.
    `bash slurm/status.sh <experiment>` shows any experiment, e.g. `bash slurm/status.sh 2026-10-06_v2_multiseed`.
 
 What happens to unfinished work on a re-submit:

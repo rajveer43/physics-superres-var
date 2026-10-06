@@ -38,6 +38,11 @@ wanted() { (($(stage_index "$1") >= FROM_I)); }
 
 load_settings
 unset RUN_ENV
+if ((!SMOKE)) && [[ "$FROM" != prepare && -z "$RUN_DATE" ]]; then
+    # a restart continues the latest experiment with this tag, even on a later day
+    RUN_DATE="$(latest_experiment_date)"
+    [[ -n "$RUN_DATE" ]] && echo "continuing the experiment from $RUN_DATE (set RUN_DATE in settings.sh to pick another)"
+fi
 if ((SMOKE)); then
     ROOT="$ROOT/smoke"
     resolve_experiment -smoke

@@ -42,6 +42,15 @@ load_experiment() {
     load_settings
 }
 
+# Most recent experiment with this dataset, version and tag -> its date (empty if none).
+latest_experiment_date() {
+    local d
+    # shellcheck disable=SC2012
+    d="$(ls -td "$ROOT/logs/"*"_${VERSION}_${RUN_TAG}" 2> /dev/null | head -1)"
+    [[ -n "$d" && -f "$d/run.env" ]] && grep -q "^export DATASET=$DATASET\$" "$d/run.env" || return 0
+    basename "$d" | cut -c1-10
+}
+
 # Fix the experiment name once (submit_all.sh): RUN_DATE (today if empty), RUN_TAG (+ suffix) and
 # EXPERIMENT = <date>_<version>_<tag>, the same rule as superres.io_utils.experiment_name.
 resolve_experiment() {
@@ -86,7 +95,9 @@ setup_python() {
         source /usr/share/lmod/lmod/init/bash
     fi
     if type module > /dev/null 2>&1; then
+        set +u    # Lmod's shell code reads unset variables
         module load pytorch
+        set -u
     fi
     export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
     export PYTHONUNBUFFERED=1
@@ -94,7 +105,6 @@ setup_python() {
     local cpus="${SLURM_CPUS_PER_TASK:-4}"
     PHYS_CORES=$((cpus > 1 ? cpus / 2 : 1))   # Perlmutter: 2 hardware threads per core
     export OMP_NUM_THREADS="$PHYS_CORES"
-    export SLURM_CPU_BIND=cores
 }
 
 job_header() {
@@ -112,6 +122,8 @@ job_header() {
 
 # run_pipeline <stages> [--levels L] [--kinds K] [--seeds S] [--smoke]
 # Runs python -m superres.pipeline with this experiment's paths; records the session in run_info.json.
+# One process per job, started directly in the batch step so it gets all the job's CPUs and its GPU
+# (an srun step would not inherit -c from sbatch on current Slurm versions).
 run_pipeline() {
     local stages="$1"
     shift
@@ -124,10 +136,6 @@ run_pipeline() {
                   --set "${sets[@]}" ${extra[@]+"${extra[@]}"})
     echo "+ ${cmd[*]}"
     local t0=$SECONDS
-    if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-        srun --ntasks=1 "${cmd[@]}"
-    else
-        "${cmd[@]}"
-    fi
+    "${cmd[@]}"
     echo "-- $stages finished in $(((SECONDS - t0) / 60)) min"
 }
