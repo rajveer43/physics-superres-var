@@ -4,6 +4,9 @@ ML4Sci / CMS / E2E project: map coarse calorimeter data back to high resolution
 with a Visual AutoRegressive (VAR) transformer. The result is judged by physics
 observables and by downstream taggers, not by SSIM/PSNR.
 
+`main` holds model v1. Model v2 (hit/energy tokenizer, tagger checks) is developed on
+the `v2-tokenizer-fix` and `v2-eval-tagger-checks` branches.
+
 | Dataset | Content | HR grid | LR levels (sum-pooled) |
 |---|---|---|---|
 | `qg` | CMS quark/gluon jet images, channels tracks / ECAL / HCAL | 3 x 125 x 125 (padded to 128) | `pool2x2` (64²), `pool4x4` (32²), `pool8x8` (16²) |
