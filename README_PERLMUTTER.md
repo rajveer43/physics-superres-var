@@ -15,11 +15,25 @@ download + prepare ──> tokenizer (VQ-VAE) ──> transformer [per level] �
 
 ## 1. Get the code (login node)
 
+Clone the **`perlmutter-slurm` branch** (only this branch has the Slurm scripts; `main` does not):
+
 ```bash
 cd $HOME            # or anywhere; the code is small. Data and results go to $SCRATCH.
-git clone -b perlmutter-slurm https://github.com/rajveer43/physics-superres-var.git
+git clone --branch perlmutter-slurm --single-branch https://github.com/rajveer43/physics-superres-var.git
 cd physics-superres-var
+git branch --show-current     # must print: perlmutter-slurm
 ```
+
+If you already have a clone of the repository, switch it to this branch instead:
+
+```bash
+git fetch origin perlmutter-slurm
+git checkout perlmutter-slurm
+git pull
+```
+
+To pick up later fixes, run `git pull` in this folder, preferably when none of your jobs are queued: a job
+uses the code that is in this folder when it starts (its settings stay as they were at submission).
 
 ## 2. Edit `slurm/settings.sh`
 
