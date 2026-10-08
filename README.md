@@ -118,8 +118,8 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 | `train_var` | One conditional VAR per LR level | `models/var_transformer_<level>/` |
 | `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `<cache>/<ds>/<split>_<name>_sr-<decode>_<level>.npy` |
 | `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `evaluation/sr_<level>/` |
-| `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `tuning/<name>_cnn_tagger_hr*` |
-| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `models/cnn_tagger_<input>_seed<seed>/` (calo: `cnn_regressor_…`) |
+| `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `tuning/<name>_<tagger>_hr*` |
+| `train_taggers` | Tagger/regressor for `hr`, then `lr` and `sr` at every level, for each seed | `models/<tagger>_<input>_seed<seed>/`, `<tagger>` = `resnet18_tagger` (qg default) or `cnn_tagger` (`tagger.arch=cnn`); calo: `cnn_regressor` |
 | `summarize` | Tables, plots and a markdown report across all runs | `summary/` |
 
 Every training stage resumes from `last.pt` on Drive. Optuna studies resume from
@@ -136,7 +136,7 @@ their database copy on Drive. After a disconnect, re-run the notebook from the t
       models/
           vqvae_tokenizer/            multi-scale VQ-VAE
           var_transformer_<level>/    conditional VAR, one per LR level
-          cnn_tagger_<input>_seed<seed>/      qg quark/gluon tagger (calo: cnn_regressor_...)
+          resnet18_tagger_<input>_seed<seed>/ qg quark/gluon tagger (cnn_tagger_... with tagger.arch=cnn; calo: cnn_regressor_...)
               config.json  history.csv  metrics.json  best.pt  last.pt (resume point)
               test_predictions.npz                    taggers only
               figures/<name>_<model>_training-curves.png|pdf   updated each epoch
@@ -147,9 +147,9 @@ their database copy on Drive. After a disconnect, re-run the notebook from the t
       tuning/<name>_<model>.db | _trials.csv | _best.json          Optuna studies
       summary/
           <name>_report.md            all tables in one page
-          <name>_tagger-runs.csv      one row per tagger run
-          <name>_tagger-summary.csv   mean and std over seeds
-          <name>_tagger-2x3_<level>.csv   tagger trained on HR vs trained on each input
+          <name>_<tagger>-runs.csv    one row per tagger run, <tagger> = resnet18-tagger | cnn-tagger | cnn-regressor
+          <name>_<tagger>-summary.csv mean and std over seeds
+          <name>_<tagger>-2x3_<level>.csv   tagger trained on HR vs trained on each input
           <name>_sr-observables.csv   all observable comparisons
           <name>_paired.csv           event-by-event bias / resolution / correlation
           <name>_values_<level>.csv   mean of each quantity: HR | LR | SR | diagnostics

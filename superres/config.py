@@ -112,7 +112,8 @@ DATASETS = {
         },
         "tagger": {
             "task": "classification",
-            "widths": [32, 64, 128, 128],
+            "arch": "resnet18",          # resnet18 | cnn; named in run folders, summary files and titles
+            "widths": [32, 64, 128, 128],    # cnn only (also the C2ST classifier)
             "dropout": 0.1,
             "lr": 1e-3,
             "weight_decay": 1e-4,
@@ -196,6 +197,7 @@ DATASETS = {
         },
         "tagger": {
             "task": "regression",          # regress incident energy (energy calibration)
+            "arch": "cnn",                 # cnn only: resnet18 is 2-D
             "widths": [32, 64, 128],
             "dropout": 0.1,
             "lr": 1e-3,

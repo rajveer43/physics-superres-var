@@ -11,7 +11,8 @@ Layout (all names are stable, so later stages can find earlier outputs):
           models/
             vqvae_tokenizer/                   multi-scale VQ-VAE (one per experiment)
             var_transformer_{level}/           conditional VAR, one per LR level, e.g. var_transformer_pool2x2
-            cnn_tagger_{input}_seed{seed}/     qg quark/gluon tagger, e.g. cnn_tagger_sr-pool2x2_seed42
+            resnet18_tagger_{input}_seed{seed}/ qg quark/gluon tagger, e.g. resnet18_tagger_sr-pool2x2_seed42
+            cnn_tagger_{input}_seed{seed}/     the same with tagger.arch=cnn
             cnn_regressor_{input}_seed{seed}/  calo incident-energy regressor
                 config.json  history.csv  metrics.json  best.pt  last.pt  figures/
           evaluation/
@@ -19,6 +20,7 @@ Layout (all names are stable, so later stages can find earlier outputs):
                 figures/diagnostics/           the same with diagnostic methods added
           tuning/                              Optuna studies: {name}.db, {name}_trials.csv, {name}_best.json
           summary/                             {name}_report.md, tables (*.csv), figures/
+                                               tagger files name the tagger, e.g. {name}_resnet18-tagger-2x3_pool2x2.csv
 
 name    : {dataset}_{version}_{date}_{tag}, e.g. qg_v2_2026-10-06_multiseed. Every file name starts with it
           (figures: {name}_{model or level}_{what}.png), so a file copied elsewhere still says where it is from.
@@ -74,8 +76,24 @@ _RUNS = {"vqvae": ("models", "vqvae_tokenizer"), "var": ("models", "var_transfor
          "tagger": ("models", None), "sreval": ("evaluation", "sr")}
 
 
+def tagger_arch(cfg):
+    """cnn | resnet18 (runs from before tagger.arch existed are cnn)."""
+    return "resnet18" if cfg.get("tagger", {}).get("arch", "cnn") == "resnet18" else "cnn"
+
+
 def _tagger_name(cfg):
-    return "cnn_tagger" if cfg.get("tagger", {}).get("task", "classification") == "classification" else "cnn_regressor"
+    task = "tagger" if cfg.get("tagger", {}).get("task", "classification") == "classification" else "regressor"
+    return f"{tagger_arch(cfg)}_{task}"
+
+
+def tagger_tag(cfg):
+    """The tagger in summary file names, e.g. resnet18-tagger, cnn-regressor."""
+    return _tagger_name(cfg).replace("_", "-")
+
+
+def tagger_title(cfg):
+    """The tagger in figure titles and report headings, e.g. ResNet-18 tagger."""
+    return f"{ {'cnn': 'CNN', 'resnet18': 'ResNet-18'}[tagger_arch(cfg)]} {_tagger_name(cfg).split('_')[1]}"
 
 
 def run_folder(cfg, stage, variant=None, seed=None):

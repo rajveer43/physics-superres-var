@@ -50,12 +50,24 @@ def fake_calo(raw, n=(2000, 500), seed=0):
             f["incident_energies"] = e
 
 
+def check_taggers():
+    """ResNet-18 on HR (128) and LR (64) shapes; a config without tagger.arch means the small CNN."""
+    import torch
+    from superres.models import TAGGERS, ResNet18Tagger, Tagger
+    for shape in [(128, 128), (64, 64)]:
+        m = ResNet18Tagger(2, 3, shape, None, 1, 0.1, (), 3).eval()
+        assert m(torch.randn(2, 3, *shape), torch.randn(2, 3)).shape == (2, 1)
+    print("ResNet18Tagger parameters:", sum(q.numel() for q in m.parameters()))
+    assert TAGGERS[{}.get("arch", "cnn")] is Tagger
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", default="/tmp/superres_smoke")
     p.add_argument("--dataset", default="both", choices=["qg", "calo", "both"])
     a = p.parse_args()
     from superres.pipeline import run
+    check_taggers()
     paths = {"paths.drive_root": os.path.join(a.root, "results"), "paths.raw_root": os.path.join(a.root, "raw"),
              "paths.cache_root": os.path.join(a.root, "cache"), "num_workers": 0}
     stages = ["prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_var", "generate", "eval_sr",
@@ -65,6 +77,8 @@ def main():
         if not os.listdir(raw) if os.path.isdir(raw) else True:
             (fake_qg if ds == "qg" else fake_calo)(raw)
         run(ds, stages, overrides=paths, smoke=True)
+        if ds == "qg":  # the same taggers again with the small CNN, in their own folders
+            run(ds, ["train_taggers", "tagger_xeval"], overrides={**paths, "tagger.arch": "cnn"}, smoke=True)
     print("\nSMOKE TEST PASSED")
 
 

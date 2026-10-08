@@ -35,8 +35,8 @@ check() {
 }
 echo "checking outputs in $exp"
 check "$exp/summary/${pfx}_report.md"
-check "$exp/summary/${pfx}_tagger-2x3_*.csv"
-check "$exp/summary/figures/${pfx}_tagger-curves_*.png"
+check "$exp/summary/${pfx}_*-tagger-2x3_*.csv"
+check "$exp/summary/figures/${pfx}_*-tagger-curves_*.png"
 check "$exp/evaluation/sr_*/paired.csv"
 check "$exp/models/vqvae_tokenizer/best.pt"
 check "$exp/models/var_transformer_*/best.pt"

@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from . import metrics as M
 from .data import CacheStore, SRDataset, TaggerDataset, hit_threshold, normalize, target_transform
 from .io_utils import RunDir, load_json, run_path
-from .models import VQVAE, ConditionalVAR, Tagger
+from .models import TAGGERS, VQVAE, ConditionalVAR
 
 
 # ------------------------------------------------------------------ helpers
@@ -465,7 +465,8 @@ def reconstruct_with_tokenizer(cfg, store, hr, lr, level, batch_size=64):
 # ------------------------------------------------------------------ taggers
 def build_tagger(cfg, store, kind, tcfg=None):
     tcfg = tcfg or cfg["tagger"]
-    return Tagger(len(store.hr_shape), store.C, store.shape(kind), tcfg["widths"], 1, tcfg["dropout"],
+    arch = tcfg.get("arch", "cnn")  # checkpoints from before tagger.arch existed are cnn
+    return TAGGERS[arch](len(store.hr_shape), store.C, store.shape(kind), tcfg["widths"], 1, tcfg["dropout"],
                   cfg["data"]["circular_dims"], n_global=store.C)
 
 

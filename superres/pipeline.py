@@ -13,7 +13,7 @@ applied to HR / uniformly up-sampled LR / SR, next to a tagger trained on each i
 import argparse
 
 from . import tuning
-from .config import get_config, parse_set_args
+from .config import apply_overrides, get_config, parse_set_args
 
 ORDER = ["download", "prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_var",
          "generate", "eval_sr", "tune_tagger", "train_taggers", "tagger_xeval", "summarize"]
@@ -53,7 +53,8 @@ def run_stage(cfg, stage, levels=None, kinds=None, seeds=None):
         return None
     if stage == "eval_sr":
         from .evaluate import evaluate_level
-        c = tuning.with_tuned(cfg, "tagger", "hr")  # C2ST uses the tagger CNN
+        c = apply_overrides(cfg, {"tagger.arch": "cnn"})  # C2ST uses the tagger CNN and its tuned settings
+        c = tuning.with_tuned(c, "tagger", "hr")
         return {lvl: evaluate_level(c, lvl) for lvl in levels}
     if stage == "tune_tagger":
         return tuning.tune_tagger(cfg)

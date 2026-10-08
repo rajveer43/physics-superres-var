@@ -98,7 +98,7 @@ def c2st_auc(cfg, store, ref, other, seed):
     a, b = int(0.5 * len(perm)), int(0.75 * len(perm))
     parts = {"train": perm[:a], "val": perm[a:b], "test": perm[b:]}
     dev, amp = device(), Amp(cfg)
-    tcfg = dict(cfg["tagger"], patience=2)
+    tcfg = dict(cfg["tagger"], patience=2, arch="cnn")  # C2ST stays on the small CNN
     model, dls = fit_classifier(cfg, store, "hr", {k: X[v] for k, v in parts.items()},
                                 {k: y[v] for k, v in parts.items()}, cfg["eval"]["c2st_epochs"], seed, tcfg, dev, amp)
     p, t = predict(model, dls["test"], dev, amp)
@@ -404,11 +404,11 @@ def plot_tagger_curves(cfg, level, seeds=None):
         ax.set_title(title, fontsize=9)
         ax.set_xlabel("epoch")
     axes[0, 0].legend(fontsize=7, frameon=False)
-    fig.suptitle(f"{cfg['dataset']} {level}: tagger training, seeds {list(seeds)} "
+    fig.suptitle(f"{cfg['dataset']} {level}: {io_utils.tagger_title(cfg)} training, seeds {list(seeds)} "
                  f"(dot = epoch kept by early stopping)", fontsize=9)
     fig.tight_layout()
     fdir = io_utils.summary_dir(cfg, "figures")
-    io_utils.save_figure(fig, fdir, f"{io_utils.prefix(cfg)}_tagger-curves_{level}")
+    io_utils.save_figure(fig, fdir, f"{io_utils.prefix(cfg)}_{io_utils.tagger_tag(cfg)}-curves_{level}")
     plt.close(fig)
     return fig
 
@@ -462,9 +462,9 @@ def tagger_cross_eval(cfg, level, seeds=None):
         return None
     long = pd.DataFrame(rows)
     pfx, sdir = io_utils.prefix(cfg), io_utils.summary_dir(cfg)
-    long.to_csv(os.path.join(sdir, f"{pfx}_tagger-2x3-runs_{level}.csv"), index=False)
+    long.to_csv(os.path.join(sdir, f"{pfx}_{io_utils.tagger_tag(cfg)}-2x3-runs_{level}.csv"), index=False)
     table = _table_2x3(long, key, list(a_inputs))
-    table.to_csv(os.path.join(sdir, f"{pfx}_tagger-2x3_{level}.csv"))
+    table.to_csv(os.path.join(sdir, f"{pfx}_{io_utils.tagger_tag(cfg)}-2x3_{level}.csv"))
     _plot_2x3(long, key, key_label, list(a_inputs), level, cfg)
     if "same_events" in long and not long["same_events"].fillna(True).all():
         print(f"  [{level}] some column-B runs predate the same-events change; retrain them for a fair table")
@@ -504,10 +504,11 @@ def _plot_2x3(long, key, key_label, row_order, level, cfg):
     ax.set_xticklabels(["LR (stretched to HR grid in A)" if r == "LR" else r for r in rows], fontsize=8)
     vals = long[key].astype(float)
     ax.set_ylim(vals.min() - 0.05 * abs(vals.min()), vals.max() + 0.03 * abs(vals.max()))
-    ax.set_ylabel(f"tagger {key_label}")
-    ax.set_title(f"{cfg['dataset']} {level}: tagger trained on HR (A) vs trained on each input (B)", fontsize=9)
+    ax.set_ylabel(f"{io_utils.tagger_title(cfg)} {key_label}")
+    ax.set_title(f"{cfg['dataset']} {level}: {io_utils.tagger_title(cfg)} trained on HR (A) vs trained on each input (B)",
+                 fontsize=9)
     ax.legend(fontsize=8, frameon=False)
-    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}_tagger-2x3_{level}")
+    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}_{io_utils.tagger_tag(cfg)}-2x3_{level}")
     plt.close(fig)
 
 
@@ -547,6 +548,7 @@ def summarize(cfg):
     sdir, fdir = io_utils.summary_dir(cfg), io_utils.summary_dir(cfg, "figures")
     levels = list(cfg["data"]["levels"])
     sections = []
+    tt, title = io_utils.tagger_tag(cfg), io_utils.tagger_title(cfg)
 
     # taggers
     rows = []
@@ -560,23 +562,23 @@ def summarize(cfg):
         rows.append(row)
     if rows:
         tag = pd.DataFrame(rows)
-        tag.to_csv(os.path.join(sdir, f"{pfx}_tagger-runs.csv"), index=False)
+        tag.to_csv(os.path.join(sdir, f"{pfx}_{tt}-runs.csv"), index=False)
         key = "auc" if ds == "qg" else "mean_binned_resolution"
         num = [c for c in tag.columns if tag[c].dtype.kind in "fi" and c not in ("seed", "n_train")]
         agg = tag.groupby(["method", "level"])[num].agg(["mean", "std"])
         agg.columns = [f"{a} ({'mean' if b == 'mean' else 'spread over seeds'})" for a, b in agg.columns]
         agg.insert(0, "n seeds", tag.groupby(["method", "level"])["seed"].nunique())
         agg = agg.reset_index()
-        agg.to_csv(os.path.join(sdir, f"{pfx}_tagger-summary.csv"), index=False)
-        sections.append(("Downstream tagger / regressor on the test set. 'boot_err' is the uncertainty from "
+        agg.to_csv(os.path.join(sdir, f"{pfx}_{tt}-summary.csv"), index=False)
+        sections.append((f"Downstream {title} on the test set. 'boot_err' is the uncertainty from "
                          "resampling the test set; 'spread over seeds' needs at least two seeds.", agg))
-        _plot_tagger(tag, key, levels, fdir, ds, pfx)
+        _plot_tagger(tag, key, levels, fdir, ds, pfx, tt, title)
         if ds == "calo":
             _plot_calo_resolution(cfg, fdir, pfx)
     for level in levels:
-        path = os.path.join(sdir, f"{pfx}_tagger-2x3_{level}.csv")
+        path = os.path.join(sdir, f"{pfx}_{tt}-2x3_{level}.csv")
         if os.path.exists(path):
-            sections.append((f"{level}: tagger {_tagger_key(cfg)[1]}, A = trained on HR only and applied to each "
+            sections.append((f"{level}: {title} {_tagger_key(cfg)[1]}, A = trained on HR only and applied to each "
                              "input (LR stretched back to the HR grid), B = trained and tested on each input",
                              pd.read_csv(path, index_col=0)))
 
@@ -621,13 +623,13 @@ def summarize(cfg):
     if rows:
         c = pd.DataFrame(rows).groupby(["level", "method"]).first().reset_index()
         c.to_csv(os.path.join(sdir, f"{pfx}_c2st-closure.csv"), index=False)
-        sections.append(("Two-sample test AUC (0.5 = a CNN cannot tell it from HR) and LR closure "
+        sections.append(("Two-sample test AUC (0.5 = the small CNN cannot tell it from HR) and LR closure "
                          "(sum|pool(SR) - LR| / sum LR; 0 = agrees with the coarse measurement)", c))
     _write_report(cfg, sections, sdir)
     return dict(sections)
 
 
-def _plot_tagger(tag, key, levels, fdir, ds, pfx):
+def _plot_tagger(tag, key, levels, fdir, ds, pfx, tt, title):
     fig, ax = plt.subplots(figsize=(5.5, 3.8))
     hr = tag[tag["method"] == "hr"][key]
     if len(hr):
@@ -642,9 +644,9 @@ def _plot_tagger(tag, key, levels, fdir, ds, pfx):
     ax.set_xticks(x)
     ax.set_xticklabels(levels)
     ax.set_xlabel("down-sampling level")
-    ax.set_ylabel("tagger ROC AUC" if ds == "qg" else "energy resolution (mean over bins)")
+    ax.set_ylabel(f"{title} ROC AUC" if ds == "qg" else f"{title}: energy resolution (mean over bins)")
     ax.legend(fontsize=8, frameon=False)
-    io_utils.save_figure(fig, fdir, f"{pfx}_tagger-{key}-vs-level")
+    io_utils.save_figure(fig, fdir, f"{pfx}_{tt}-{key}-vs-level")
     plt.close(fig)
 
 

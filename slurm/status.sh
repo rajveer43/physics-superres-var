@@ -39,14 +39,16 @@ for l in "${LEVEL_LIST[@]}"; do
     echo "$(mark "$cache/train_${pfx}_sr-*_${l}.npy") super-resolved train split, $l"
     echo "$(mark "$exp/evaluation/sr_${l}/observables.csv") evaluation evaluation/sr_${l}"
 done
-tagger_model=cnn_tagger
+arch=resnet18                 # the qg default (superres/config.py); calo is always cnn
+[[ "$EXTRA_SET" == *tagger.arch=*cnn* ]] && arch=cnn
+tagger_model=${arch}_tagger
 [[ "$DATASET" == calo ]] && tagger_model=cnn_regressor
 for group in early late; do
     while read -r kind seed; do
         echo "$(mark "$exp/models/${tagger_model}_${kind/:/-}_seed${seed}/metrics.json") tagger     models/${tagger_model}_${kind/:/-}_seed${seed}"
     done < <(tagger_tasks "$group")
 done
-echo "$(mark "$exp/summary/${pfx}_tagger-2x3_*.csv") 2x3 tagger table"
+echo "$(mark "$exp/summary/${pfx}_${tagger_model/_/-}-2x3_*.csv") 2x3 tagger table"
 echo "$(mark "$exp/summary/${pfx}_report.md") summary    summary/${pfx}_report.md"
 compgen -G "$ROOT/results_${pfx}*.tar.gz" > /dev/null && echo "packed: $(ls "$ROOT"/results_"${pfx}"*.tar.gz)"
 

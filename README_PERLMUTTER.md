@@ -89,11 +89,15 @@ bash slurm/status.sh                 # queue, what is finished, end of each log;
     run_info.json                         every job: id, node, GPU, code version, full config
     models/vqvae_tokenizer/               the tokenizer
     models/var_transformer_pool2x2/       the transformer for each level
-    models/cnn_tagger_sr-pool2x2_seed42/  the taggers: input (hr, lr-<level>, sr-<level>) and seed
+    models/resnet18_tagger_sr-pool2x2_seed42/  the taggers: input (hr, lr-<level>, sr-<level>) and seed
     evaluation/sr_pool2x2/                physics comparison of each level
     summary/qg_v2_2026-10-06_multiseed_report.md   the report, with tables and figures next to it
   ```
 - If a job fails, the jobs that depend on it are cancelled automatically (`--kill-on-invalid-dep`).
+- The qg tagger is a ResNet-18 (`models/resnet18_tagger_*`; summary files and figures say `resnet18-tagger`).
+  For the small CNN instead, set `EXTRA_SET="tagger.arch=cnn"` (`models/cnn_tagger_*`, `cnn-tagger` files).
+  To add ResNet taggers to an experiment trained with the CNN: `bash slurm/submit_all.sh --from taggers`.
+  `<name>_report.md` is rewritten for the tagger of the latest summary job.
 
 ## 6. If something fails or times out
 

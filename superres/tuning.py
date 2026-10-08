@@ -4,7 +4,7 @@ study, in {experiment}/tuning/ (name = {dataset}_{version}_{date}_{tag}, so each
                                   objective (validation set)                                 direction
 {name}_vqvae_tokenizer            MSE + median per-channel |dE/E| + |1 - predicted/true hits|  minimise
 {name}_var_transformer_all        next-scale token cross-entropy                             minimise
-{name}_cnn_tagger_hr              qg: ROC AUC / calo: mean binned resolution                 max / min
+{name}_{tagger}_hr                qg: ROC AUC / calo: mean binned resolution                 max / min
 
 Trials use short schedules (optuna.trial_epochs) on a subset of the training
 data (optuna.trial_max_train); the best parameters are stored as dotted config
