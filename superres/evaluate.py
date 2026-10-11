@@ -116,13 +116,24 @@ def _hist_range(ref, others):
     return lo, hi
 
 
-def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
+def _ratio_limits(ratios):
+    """0.5-1.5 (linear) when every ratio fits, else a log range wide enough for them (at most 1/20 - 20)."""
+    r = np.concatenate([q[np.isfinite(q) & (q > 0)] for q in ratios] + [np.ones(1)])
+    if r.min() >= 0.5 and r.max() <= 1.5:
+        return 0.5, 1.5, False
+    return min(max(r.min() / 1.3, 0.05), 0.5), max(min(r.max() * 1.3, 20.0), 2.0), True
+
+
+def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix, min_ref=10):
+    """Normalised histograms with a ratio panel. Bins with fewer than min_ref HR events get no ratio;
+    ratios beyond the panel are drawn on its edge, so a large shift stays visible."""
     lo, hi = _hist_range(ref, others)
     edges = np.linspace(lo, hi, bins + 1)
     fig, (ax, rx) = plt.subplots(2, 1, figsize=(5, 4.6), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
-    h_ref, _ = np.histogram(ref, edges)
-    h_ref = h_ref / max(len(ref), 1) / np.diff(edges)  # normalised to all events, so out-of-range ones are missing
+    n_ref, _ = np.histogram(ref, edges)
+    h_ref = n_ref / max(len(ref), 1) / np.diff(edges)  # normalised to all events, so out-of-range ones are missing
     ax.stairs(h_ref, edges, fill=True, alpha=0.3, **STYLE["hr"])
+    ratios = {}
     for m, v in others.items():
         h, _ = np.histogram(v, edges)
         out = 1 - h.sum() / max(len(v), 1)
@@ -132,10 +143,15 @@ def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
             style = dict(style, label=f"{style['label']} ({100 * out:.1f}% outside)")
         ax.stairs(h, edges, lw=1.4, **style)
         with np.errstate(divide="ignore", invalid="ignore"):
-            rx.stairs(np.where(h_ref > 0, h / h_ref, np.nan), edges, color=_style(m)["color"], lw=1.2)
+            ratios[m] = np.where(n_ref >= min_ref, h / h_ref, np.nan)
+    r_lo, r_hi, log = _ratio_limits(list(ratios.values()))
+    for m, r in ratios.items():
+        rx.stairs(np.clip(r, r_lo, r_hi), edges, baseline=None, color=_style(m)["color"], lw=1.2)
     rx.axhline(1, color="0.3", lw=0.8)
-    rx.set_ylim(0.5, 1.5)
-    rx.set_ylabel("ratio to HR")
+    if log:
+        rx.set_yscale("log")
+    rx.set_ylim(r_lo, r_hi)
+    rx.set_ylabel("ratio to HR" + (" (log)" if log else ""), fontsize=8)
     rx.set_xlabel(name)
     ax.set_ylabel("normalised")
     ax.legend(fontsize=7, frameon=False)
@@ -146,7 +162,12 @@ def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix):
 def _scatter(ref, others, name, fig_dir, prefix, max_points=3000):
     """Same events: each method's value against the HR value, with the y = x line."""
     fig, axes = plt.subplots(1, len(others), figsize=(3.6 * len(others), 3.6), squeeze=False)
-    lo, hi = _hist_range(ref, others)
+    k_all = min([len(ref)] + [len(v) for v in others.values()] + [max_points])
+    vals = np.concatenate([np.asarray(ref[:k_all], float)] + [np.asarray(v[:k_all], float) for v in others.values()])
+    vals = vals[np.isfinite(vals)]
+    lo, hi = (vals.min(), vals.max()) if len(vals) else (0.0, 1.0)  # every plotted point, none cut off
+    pad = 0.03 * (hi - lo) or 0.5
+    lo, hi = lo - pad, hi + pad
     for ax, (m, v) in zip(axes[0], others.items()):
         k = min(len(ref), len(v), max_points)
         p = M.paired_metrics(ref[:k], v[:k])

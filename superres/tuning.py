@@ -131,11 +131,16 @@ def tune_tagger(cfg):
     base_w = cfg["tagger"]["widths"]
     classify = cfg["tagger"]["task"] == "classification"
 
+    arch = cfg["tagger"].get("arch", "cnn")
+    key = "tagger.resnet18." if arch == "resnet18" else "tagger."  # where train_tagger reads them
+
     def suggest(t):
-        return {"tagger.lr": t.suggest_float("lr", 1e-4, 3e-3, log=True),
-                "tagger.dropout": t.suggest_float("dropout", 0.0, 0.4),
-                "tagger.weight_decay": t.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
-                "tagger.widths": _scaled(base_w, t.suggest_categorical("width_factor", [0.5, 1.0, 2.0]))}
+        out = {key + "lr": t.suggest_float("lr", 1e-4, 3e-3, log=True),
+               key + "dropout": t.suggest_float("dropout", 0.0, 0.4),
+               key + "weight_decay": t.suggest_float("weight_decay", 1e-5, 1e-1, log=True)}
+        if arch == "cnn":
+            out["tagger.widths"] = _scaled(base_w, t.suggest_categorical("width_factor", [0.5, 1.0, 2.0]))
+        return out
 
     def fn(c, trial):
         return train_tagger(c, "hr", c["seed"], trial=trial, epochs=o["trial_epochs"]["tagger"],

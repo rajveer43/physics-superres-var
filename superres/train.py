@@ -133,9 +133,18 @@ def _save(run, name, model, opt, epoch, stopper, extra):
 
 # ------------------------------------------------------------------ VQ-VAE
 VQVAE_CURVES = [("loss", ["train_loss", "train_rec", "train_hit", "train_energy", "train_vq"]),
-                ("validation", ["val_rec_mse", "val_channel_energy_err_median", "objective"]),
-                ("hits", ["val_hit_precision", "val_hit_recall", "val_hit_count_ratio"]),
+                ("validation", ["val_channel_energy_err_median", "objective"]),
+                ("reconstruction MSE (hard output)", ["val_rec_mse"]),
+                ("hits, all channels", ["val_hit_precision", "val_hit_recall", "val_hit_count_ratio"]),
                 ("codebook", ["codebook_usage"])]
+
+
+def vqvae_curves(cfg):
+    """VQVAE_CURVES plus per-channel panels: pooled metrics are dominated by the calorimeter cells and
+    hid the loss of track energy."""
+    ch = cfg["data"]["channels"]
+    return VQVAE_CURVES + [("energy kept, sum E_pred / sum E_true", [f"val_energy_ratio_{c}" for c in ch]),
+                           ("hit recall per channel", [f"val_hit_recall_{c}" for c in ch])]
 VAR_CURVES = [("cross-entropy", ["train_ce", "val_ce"]),
               ("token accuracy", ["val_token_acc", "val_token_acc_last_scale"])]
 TAGGER_CURVES = [("loss", ["train_loss", "val_loss"]),
@@ -176,7 +185,10 @@ def vqvae_losses(model, x, lr, s, vc, amp):
     """Tokenizer losses on normalised images x (B, C, *grid).
     rec    : log-energy MSE on the cells that are hit in the truth
     hit    : hit / no-hit cross-entropy against E > readout threshold
-    energy : per-channel |log E_pred - log E_true|, with E_pred = sum p(hit) * energy (differentiable)"""
+    energy : per-channel |log E_pred - log E_true|, with E_pred = sum mask * energy. vqvae.energy_mask:
+             soft: mask = p(hit). A cell with p = 0.3 counts 30 % here but is dropped by to_image (p <= 0.5).
+             hard: mask = the 0/1 cut of to_image, gradients through p (straight-through), so the loss sees
+                   the energy the output really keeps."""
     with amp.ctx():
         energy, hit_logit, vq_loss, f = model(x, lr)
     energy, hit_logit = energy.float(), hit_logit.float()
@@ -186,7 +198,10 @@ def vqvae_losses(model, x, lr, s, vc, amp):
     hit_loss = F.binary_cross_entropy_with_logits(hit_logit, hit, pos_weight=pos_w)
     dims = tuple(range(2, x.dim()))
     e_true = to_energy(x, s).sum(dims)
-    e_pred = (to_energy(energy, s) * torch.sigmoid(hit_logit)).sum(dims)
+    p_hit = torch.sigmoid(hit_logit)
+    if vc.get("energy_mask", "soft") == "hard":
+        p_hit = (p_hit > model.hit_threshold).float() + p_hit - p_hit.detach()
+    e_pred = (to_energy(energy, s) * p_hit).sum(dims)
     eps = 1e-3 * s.flatten()[None]
     e_loss = (torch.log(e_pred + eps) - torch.log(e_true + eps)).abs().mean()
     loss = (rec + vc.get("hit_weight", 1.0) * hit_loss + vc["energy_weight"] * e_loss + vq_loss.float())
@@ -195,11 +210,13 @@ def vqvae_losses(model, x, lr, s, vc, amp):
 
 
 @torch.no_grad()
-def _eval_vqvae(model, dl, s, dev, amp, thresh, levels):
+def _eval_vqvae(model, dl, s, dev, amp, thresh, levels, names=()):
     """Metrics on the hard output (what VAR will produce): MSE over all cells, per-channel energy
-    error, and how well hit cells are found (precision, recall, predicted / true hit count)."""
+    error, and how well hit cells are found (precision, recall, predicted / true hit count).
+    Per channel (names): total energy kept, sum E_pred / sum E_true, and hit recall."""
     model.eval()
     mse, eerr, n, tp, n_pred, n_true = 0.0, [], 0, 0.0, 0.0, 0.0
+    e_t, e_p, tp_c, true_c = 0.0, 0.0, 0.0, 0.0
     for i, b in enumerate(dl):
         x = b["hr"].to(dev, non_blocking=True)
         with amp.ctx():
@@ -209,7 +226,10 @@ def _eval_vqvae(model, dl, s, dev, amp, thresh, levels):
         dims = tuple(range(2, x.dim()))
         et, ep = to_energy(x, s).sum(dims), to_energy(rec, s).sum(dims)
         eerr.append(((ep - et).abs() / et.clamp_min(1e-9)).flatten().cpu())
+        e_t, e_p = e_t + et.sum(0).double().cpu(), e_p + ep.sum(0).double().cpu()
         p, t = rec > 0, x > model.hit_level
+        tp_c = tp_c + (p & t).sum((0, *dims)).double().cpu()
+        true_c = true_c + t.sum((0, *dims)).double().cpu()
         tp += (p & t).sum().item()
         n_pred += p.sum().item()
         n_true += t.sum().item()
@@ -219,7 +239,9 @@ def _eval_vqvae(model, dl, s, dev, amp, thresh, levels):
             "val_channel_energy_err_mean": float(np.mean(np.clip(eerr, 0, 10))),
             "val_hit_precision": tp / max(n_pred, 1.0), "val_hit_recall": tp / max(n_true, 1.0),
             "val_hit_count_ratio": n_pred / max(n_true, 1.0),
-            "codebook_usage": float((model.vq.usage > thresh).float().mean())}
+            "codebook_usage": float((model.vq.usage > thresh).float().mean()),
+            **{f"val_energy_ratio_{c}": float(e_p[i] / max(e_t[i], 1e-9)) for i, c in enumerate(names)},
+            **{f"val_hit_recall_{c}": float(tp_c[i] / max(true_c[i], 1.0)) for i, c in enumerate(names)}}
 
 
 def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=True):
@@ -268,7 +290,7 @@ def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=
             step += 1
         used = float((model.vq.usage > vc["dead_thresh"]).float().mean())  # before the reset below
         dead = model.vq.reinit_dead(f_last, vc["dead_thresh"])
-        val = _eval_vqvae(model, dl_va, s, dev, amp, vc["dead_thresh"], levels)
+        val = _eval_vqvae(model, dl_va, s, dev, amp, vc["dead_thresh"], levels, cfg["data"]["channels"])
         val["codebook_usage"] = used
         # hard-output MSE + per-channel energy error + missed / invented hits
         objective = (val["val_rec_mse"] + val["val_channel_energy_err_median"]
@@ -280,7 +302,7 @@ def train_vqvae(cfg, trial=None, epochs=None, max_train=None, save=True, resume=
         print({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()})
         if run is not None:
             run.log(row)
-            run.plot_history(VQVAE_CURVES)
+            run.plot_history(vqvae_curves(cfg))
             extra = {"vq_cfg": vc}
             if improved:
                 _save(run, "best.pt", model, None, epoch, None, extra)
@@ -463,8 +485,23 @@ def reconstruct_with_tokenizer(cfg, store, hr, lr, level, batch_size=64):
 
 
 # ------------------------------------------------------------------ taggers
+def tagger_settings(cfg):
+    """cfg["tagger"] with the block of its architecture on top, e.g. tagger.resnet18.weight_decay."""
+    tc = dict(cfg["tagger"])
+    tc.update(tc.get(tc.get("arch", "cnn"), {}))
+    return tc
+
+
+def _flip(x):
+    """Random reflection of each 2-D jet image in eta and in phi (the q/g label does not change)."""
+    for d in (-1, -2):
+        m = torch.rand(x.size(0), device=x.device) < 0.5
+        x = torch.where(m.view(-1, *[1] * (x.dim() - 1)), x.flip(d), x)
+    return x
+
+
 def build_tagger(cfg, store, kind, tcfg=None):
-    tcfg = tcfg or cfg["tagger"]
+    tcfg = tcfg or tagger_settings(cfg)
     arch = tcfg.get("arch", "cnn")  # checkpoints from before tagger.arch existed are cnn
     return TAGGERS[arch](len(store.hr_shape), store.C, store.shape(kind), tcfg["widths"], 1, tcfg["dropout"],
                   cfg["data"]["circular_dims"], n_global=store.C)
@@ -536,7 +573,7 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
     Every input uses the same train / val / test events (CacheStore.n_common)."""
     set_seed(seed)
     dev, amp, store = device(), Amp(cfg), CacheStore(cfg)
-    tc = cfg["tagger"]
+    tc = tagger_settings(cfg)
     epochs = epochs or tc["epochs"]
     max_train = max_train or tc["max_train"]
     classify = tc["task"] == "classification"
@@ -550,8 +587,9 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
     cap = {s: min(c or math.inf, store.n_common(s, levels)) for s, c in cap.items()}  # same events for every input
     ds = {s: TaggerDataset(store, store.array(s, kind), tgt[s], kind, cap[s]) for s in ("train", "val", "test")}
     dls = {k: loader(v, tc["batch_size"], k == "train", cfg, drop_last=k == "train") for k, v in ds.items()}
-    model = build_tagger(cfg, store, kind).to(dev)
+    model = build_tagger(cfg, store, kind, tc).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
+    augment = tc.get("augment", False) and len(store.hr_shape) == 2
     variant = kind.replace(":", "-")
     run = RunDir(cfg, "tagger", variant, seed) if save else None
     if run is not None:
@@ -564,8 +602,11 @@ def train_tagger(cfg, kind, seed, trial=None, epochs=None, max_train=None, save=
         t0, run_loss, n_right, n_seen = time.time(), 0.0, 0, 0
         for x, g, t in dls["train"]:
             lr_now = set_lr(opt, step, total, tc["lr"], min(500, total // 10 + 1))
+            x = x.to(dev, non_blocking=True)
+            if augment:
+                x = _flip(x)
             with amp.ctx():
-                p = model(x.to(dev, non_blocking=True), g.to(dev, non_blocking=True)).float().squeeze(1)
+                p = model(x, g.to(dev, non_blocking=True)).float().squeeze(1)
             t = t.to(dev)
             loss = F.binary_cross_entropy_with_logits(p, t) if classify else F.huber_loss(p, t, delta=1.0)
             amp.step(loss, opt, model.parameters())

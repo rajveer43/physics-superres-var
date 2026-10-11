@@ -81,6 +81,8 @@ DATASETS = {
             "hit_weight": 1.0,                     # hit / no-hit cross-entropy
             "hit_pos_weight": 1.0,                 # >1 favours predicting hits
             "hit_threshold": 0.5,                  # a cell is "hit" when p(hit) exceeds this
+            "energy_mask": "soft",                 # energy loss counts p(hit) (soft) or the 0/1 output cut
+                                                   # with straight-through gradients (hard); see vqvae_losses
             "lr_decoder": True,                    # decoder also sees the LR image (cycled over levels)
             "dead_thresh": 0.01,
             "patience": 6,
@@ -114,6 +116,10 @@ DATASETS = {
             "task": "classification",
             "arch": "resnet18",          # resnet18 | cnn; named in run folders, summary files and titles
             "widths": [32, 64, 128, 128],    # cnn only (also the C2ST classifier)
+            # put on top of the settings here when arch = resnet18: 11 M parameters on 32k jets overfit
+            # after 2-3 epochs with the CNN's settings, so stronger weight decay, more dropout, a lower lr
+            # and random eta / phi reflections of the training images
+            "resnet18": {"lr": 5e-4, "weight_decay": 0.05, "dropout": 0.3, "augment": True},
             "dropout": 0.1,
             "lr": 1e-3,
             "weight_decay": 1e-4,
