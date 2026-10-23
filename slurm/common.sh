@@ -26,29 +26,50 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 #   load_experiment <name>     that one, e.g. 2026-10-06_v2_multiseed
 #   load_experiment --smoke    the most recent smoke test
 load_experiment() {
-    local logs="$ROOT/logs" id="${1:-}" env_file
+    local logs="$ROOT/logs" id="${1:-}" env_file=""
     if [[ "$id" == --smoke ]]; then
         logs="$ROOT/smoke/logs"
         id=""
     fi
-    if [[ -n "$id" ]]; then
-        env_file="$logs/$id/run.env"
-    else
-        # shellcheck disable=SC2012
-        env_file="$(ls -t "$logs"/*/run.env 2> /dev/null | head -1)"
-    fi
-    [[ -f "$env_file" ]] || die "no submitted experiment found under $logs${id:+ for $id}"
+    env_file="$(newest_env_file "$logs" "${id:-*}")"
+    [[ -f "$env_file" ]] || die "no submitted $DATASET experiment found under $logs${id:+ for $id}"
     RUN_ENV="$env_file"
     load_settings
 }
 
+# Newest run.env of a $DATASET experiment whose name matches a pattern (empty if none). Looks in
+# logs/<dataset>/<experiment>/ and, for experiments submitted before logs were split by dataset,
+# in logs/<experiment>/ (only if that run.env is of this dataset).
+newest_env_file() {
+    local logs="$1" pattern="$2" f
+    local -a files=()
+    # shellcheck disable=SC2086
+    for f in "$logs/$DATASET/"$pattern/run.env "$logs/"$pattern/run.env; do
+        [[ -f "$f" ]] && grep -q "^export DATASET=$DATASET\$" "$f" && files+=("$f")
+    done
+    ((${#files[@]})) || return 0
+    # shellcheck disable=SC2012
+    ls -t "${files[@]}" | head -1 || true
+}
+
 # Most recent experiment with this dataset, version and tag -> its date (empty if none).
 latest_experiment_date() {
-    local d
-    # shellcheck disable=SC2012
-    d="$(ls -td "$ROOT/logs/"*"_${VERSION}_${RUN_TAG}" 2> /dev/null | head -1)"
-    [[ -n "$d" && -f "$d/run.env" ]] && grep -q "^export DATASET=$DATASET\$" "$d/run.env" || return 0
-    basename "$d" | cut -c1-10
+    local f
+    f="$(newest_env_file "$ROOT/logs" "*_${VERSION}_${RUN_TAG}")"
+    [[ -n "$f" ]] && basename "$(dirname "$f")" | cut -c1-10
+    return 0
+}
+
+# Logs and frozen settings of the current experiment. Split by dataset, so a qg and a calo experiment
+# with the same date and tag never share run.env. Experiments submitted before the split keep their folder.
+log_dir() {
+    local old="$ROOT/logs/$EXPERIMENT"
+    if [[ ! -d "$ROOT/logs/$DATASET/$EXPERIMENT" && -f "$old/run.env" ]] \
+        && grep -q "^export DATASET=$DATASET\$" "$old/run.env"; then
+        echo "$old"
+    else
+        echo "$ROOT/logs/$DATASET/$EXPERIMENT"
+    fi
 }
 
 # Fix the experiment name once (submit_all.sh): RUN_DATE (today if empty), RUN_TAG (+ suffix) and

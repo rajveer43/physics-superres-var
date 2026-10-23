@@ -79,10 +79,12 @@ bash slurm/status.sh                 # queue, what is finished, end of each log;
 ```
 
 - The experiment is named `<date>_<version>_<tag>`, e.g. `2026-10-06_v2_multiseed`. The submit command fixes
-  the name and freezes the settings into `$SCRATCH/superres/logs/<experiment>/run.env`, so changing `settings.sh`
+  the name and freezes the settings into `$SCRATCH/superres/logs/<dataset>/<experiment>/run.env`, so changing `settings.sh`
   afterwards does not affect jobs that are already queued.
-- Logs: `$SCRATCH/superres/logs/<experiment>/<stage>-<jobid>[_<task>].out`. The list of submitted jobs is in `jobs.tsv` there.
-- Results: `$SCRATCH/superres/experiments/qg/<experiment>/`:
+- Logs: `$SCRATCH/superres/logs/<dataset>/<experiment>/<stage>-<jobid>[_<task>].out`. The list of submitted jobs is in `jobs.tsv` there.
+  Logs are split by dataset, so qg and calo runs with the same date and tag do not share settings. Experiments
+  submitted before this split keep their old folder `logs/<experiment>/`.
+- Results: `$SCRATCH/superres/experiments/<dataset>/<experiment>/`:
 
   ```
   2026-10-06_v2_multiseed/

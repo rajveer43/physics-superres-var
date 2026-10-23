@@ -14,7 +14,7 @@ load_experiment "${1:-}"
 exp="$(experiment_dir)"
 pfx="$(prefix)"
 cache="$ROOT/cache/$DATASET"
-logdir="$ROOT/logs/$EXPERIMENT"
+logdir="$(dirname "$RUN_ENV")"
 
 echo "experiment $EXPERIMENT  ($exp)"
 echo

@@ -38,7 +38,8 @@ exclude=()
 stage_dir="$(mktemp -d)"
 trap 'rm -rf "$stage_dir"' EXIT
 ln -s "$exp" "$stage_dir/$pfx"
-[[ -d "$ROOT/logs/$EXPERIMENT" ]] && ln -s "$ROOT/logs/$EXPERIMENT" "$stage_dir/${pfx}_slurm-logs"
+logdir="$(dirname "$RUN_ENV")"
+[[ -d "$logdir" ]] && ln -s "$logdir" "$stage_dir/${pfx}_slurm-logs"
 tar -czhf "$out" ${exclude[@]+"${exclude[@]}"} --exclude='*.tmp' -C "$stage_dir" .
 echo "packed $(du -h "$out" | cut -f1)  $out"
 

@@ -1,5 +1,5 @@
 # Settings for running the pipeline on Perlmutter. This is the ONLY file to edit.
-# submit_all.sh freezes these values into $ROOT/logs/<experiment>/run.env at submit time, so editing this
+# submit_all.sh freezes these values into $ROOT/logs/<dataset>/<experiment>/run.env at submit time, so editing this
 # file later does not change jobs that are already queued.
 
 # ---- account and resources ----------------------------------------------------------------------

@@ -55,8 +55,11 @@ if [[ "$ACCOUNT" == mXXXX* ]]; then
     echo "(dry run: ACCOUNT is still the placeholder '$ACCOUNT')"
 fi
 
-LOGDIR="$ROOT/logs/$EXPERIMENT"
+LOGDIR="$(log_dir)"
 ENV_FILE="$LOGDIR/run.env"
+if [[ -f "$ENV_FILE" ]] && ! grep -q "^export DATASET=$DATASET\$" "$ENV_FILE"; then
+    die "$ENV_FILE belongs to another dataset; its queued jobs would switch to $DATASET"
+fi
 echo "experiment : $(experiment_dir)"
 echo "logs       : $LOGDIR"
 
