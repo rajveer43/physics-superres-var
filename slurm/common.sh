@@ -137,7 +137,11 @@ job_header() {
     echo "code       : $(git -C "$REPO" rev-parse --abbrev-ref HEAD 2> /dev/null) $(git -C "$REPO" rev-parse --short HEAD 2> /dev/null)"
     echo "settings   : dataset=$DATASET version=$VERSION levels='$LEVELS' seeds='$SEEDS' qos=$QOS extra='$EXTRA_SET'"
     python -c 'import sys, torch; print("python", sys.version.split()[0], "| torch", torch.__version__, "| cuda", torch.cuda.is_available())'
-    command -v nvidia-smi > /dev/null && nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
+    # CPU nodes (prepare) may have nvidia-smi on PATH but no driver: it then fails, and under
+    # set -e that failure would end the job here, before python starts
+    if command -v nvidia-smi > /dev/null; then
+        nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader 2> /dev/null || echo "(no GPU on this node)"
+    fi
     echo "==================================================================="
 }
 
