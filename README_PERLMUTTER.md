@@ -193,7 +193,7 @@ Three layer experiments and one shower experiment per run, all with the same dat
 `$ROOT/experiments/calogan_l{0,1,2}/<experiment>/` (tokenizer, transformers, layer evaluation) and
 `$ROOT/experiments/calogan/<experiment>/` (reassembled-shower evaluation, taggers, summary).
 
-1. Copy `eplus.hdf5`, `gamma.hdf5`, `piplus.hdf5` to `$ROOT/raw/calogan/` (or set `EXTRA_SET="data.source_dir=/path"`).
+1. The data download themselves (Mendeley Data, sha256-checked) in the first job; to use your own copies set `EXTRA_SET="data.source_dir=/path"`.
 2. `settings.sh`: `DATASET=calogan`, `LEVELS="lr2 lr4 lr8"`, `SEEDS="42 43 44"`, `RUN_TAG=first`.
 3. `bash slurm/submit_all.sh --smoke` (synthetic data, debug QOS), then `bash slurm/submit_all.sh`.
    The generate job also writes the template and ridge baselines of its level; the taggers on `template:<level>` wait for it.

@@ -241,6 +241,17 @@ DATASETS = {
 # cells of 40 x 80 mm. The beam hits the centre, so the shower axis is the middle cell boundary (or middle
 # cell for the 3 phi cells of L0); a pooling factor f keeps that symmetry only if it divides half the axis.
 CALOGAN_PARTICLES = ["eplus", "gamma", "piplus"]
+# Mendeley Data record pvn3xc3wy5 (DOI 10.17632/pvn3xc3wy5.1): file ids, sizes and sha256 as listed by
+# https://data.mendeley.com/public-api/datasets/pvn3xc3wy5
+CALOGAN_MENDELEY = "https://data.mendeley.com/public-files/datasets/pvn3xc3wy5/files/{id}/file_downloaded"
+CALOGAN_FILES = {
+    "eplus": {"id": "82030895-c680-432d-ac68-a6f2c8ed2641", "bytes": 406404192,
+              "sha256": "21c2969c637f34d6c2adbf046ba784d97b79932b6908e887982ebcb7408457bc"},
+    "gamma": {"id": "1141aa57-edc0-477a-a32c-a38e5934b453", "bytes": 406404192,
+              "sha256": "8d34d360bcec15182e17bb254b53f37aafb4ae7e78a595300ae0e72ba99f37e8"},
+    "piplus": {"id": "292fa8da-1877-482b-9fd3-df237d43b142", "bytes": 406404192,
+               "sha256": "15c66bc9ad18f5686125dfe30a2566367300dec1a552e6b11953a9722171563c"},
+}
 CALOGAN_LAYERS = {
     "calogan_l0": {
         "index": 0, "shape": [3, 96], "cell_mm": [160.0, 5.0], "depth_mm": 90.0,
@@ -268,8 +279,10 @@ CALOGAN_COND_DIM = 6   # log1p(E_layer / MeV) and E_layer / E_visible, for the t
 _CALOGAN_COMMON = {
     "family": "calogan",
     "data": {
-        "source_dir": None,
+        "source_dir": None,            # None: {raw_root}/calogan, downloaded from Mendeley Data if missing
         "particles": CALOGAN_PARTICLES,
+        "files": CALOGAN_FILES,
+        "url": CALOGAN_MENDELEY,
         "channels": ["energy"],
         "circular_dims": [],
         "pad": [[0, 0], [0, 0]],

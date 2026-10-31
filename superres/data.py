@@ -388,7 +388,7 @@ def prepare_calogan(cfg):
     files = [os.path.join(src, f"{p}.hdf5") for p in d["particles"]]
     missing = [f for f in files if not os.path.exists(f)]
     if missing:
-        raise RuntimeError(f"CaloGAN files not found: {missing} - copy them to {src} or set data.source_dir")
+        raise RuntimeError(f"CaloGAN files not found: {missing} - run the download stage or set data.source_dir")
     cfgs = layer_configs(cfg)
     names = sorted(cfgs)                      # calogan_l0, _l1, _l2
     rng = np.random.default_rng(cfg["seed"])

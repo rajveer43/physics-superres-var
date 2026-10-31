@@ -26,8 +26,8 @@ dataset `calogan` brings them together (reassembled showers, PID and energy tagg
 `--dataset calogan` runs every stage; per-layer stages loop over the layers. A layer can be run alone with
 `--dataset calogan_l1`.
 
-- Data: `eplus.hdf5`, `gamma.hdf5`, `piplus.hdf5` in `{raw_root}/calogan` (or `--set data.source_dir=/path`), no
-  download. Split 80/10/10 stratified by particle x 10 E_inc bins. The same events, in the same order, in all layers.
+- Data: `eplus.hdf5`, `gamma.hdf5`, `piplus.hdf5`, downloaded from Mendeley Data into `{raw_root}/calogan` by the `download`
+  stage and checked by sha256 (or use your own copies with `--set data.source_dir=/path`). Split 80/10/10 stratified by particle x 10 E_inc bins. The same events, in the same order, in all layers.
 - LR levels (phi, eta pooling): `lr2` L0 (1,2) L1 (2,2) L2 (2,1); `lr4` (1,4) (3,3) (3,3); `lr8` (3,8) (6,6) (6,3).
   Every factor keeps the beam axis on a cell edge; `tests/test_calogan.py` checks this.
 - The VAR is conditioned on the measured layer energies and fractions of the whole shower (6 numbers). E_inc and
@@ -142,7 +142,7 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 
 | Stage | What it does | Output |
 |---|---|---|
-| `download` | Zenodo (calo, md5-checked) or CERNBox share over WebDAV (qg); resumable `wget -c` | `/content/data/raw/<ds>/` |
+| `download` | Zenodo (calo, md5-checked), CERNBox share over WebDAV (qg) or Mendeley Data (calogan, sha256-checked); resumable `wget -c` | `/content/data/raw/<ds>/` |
 | `prepare` | Pad, clip negatives, sum-pool to every LR level, split into train/val/test, per-channel energy scale | `/content/data/cache/<ds>/*.npy`, `data_meta.json` on Drive |
 | `tune_vqvae` | Optuna: lr, codebook size, latent channels, β, energy weight, width | `tuning/<name>_vqvae_tokenizer*` |
 | `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `models/vqvae_tokenizer/` |

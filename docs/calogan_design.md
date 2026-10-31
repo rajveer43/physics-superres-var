@@ -1,6 +1,6 @@
 # CaloGAN: design note
 
-Dataset: CaloGAN EM-calorimeter showers (Nachman, de Oliveira, Paganini; DOI 10.17632/pvn3xc3wy5.1), 100k
+Dataset: CaloGAN EM-calorimeter showers (Nachman, de Oliveira, Paganini; DOI 10.17632/pvn3xc3wy5.1, downloaded from Mendeley Data by the `download` stage), 100k
 showers each of e+, gamma and pi+, E_inc flat on 1-100 GeV. Three longitudinal layers, each on its own grid.
 
 ## What the data looks like (measured on the three files)

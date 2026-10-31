@@ -167,22 +167,42 @@ def download_qg(cfg):
     return files
 
 
-def check_calogan(cfg):
-    """CaloGAN (Mendeley Data, DOI 10.17632/pvn3xc3wy5.1) has no stable direct links, so nothing is downloaded:
-    the three files are looked for in data.source_dir (default {raw_root}/calogan)."""
+def sha256sum(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_calogan(cfg):
+    """CaloGAN (Mendeley Data, DOI 10.17632/pvn3xc3wy5.1): eplus / gamma / piplus .hdf5, 406 MB each, fetched with
+    a resumable wget and checked against the sha256 Mendeley lists. Files already in data.source_dir (default
+    {raw_root}/calogan) are used as they are; with data.source_dir set nothing is downloaded. A smoke run uses
+    whatever files are there."""
     d = cfg["data"]
-    src = d["source_dir"] or raw_dir(cfg)
-    found = {p: os.path.join(src, f"{p}.hdf5") for p in d["particles"]}
-    missing = [f for f in found.values() if not os.path.exists(f)]
-    if missing:
-        raise RuntimeError(f"missing {missing}. Download eplus / gamma / piplus .hdf5 from "
-                           f"https://doi.org/10.17632/pvn3xc3wy5.1 into {src}, or set data.source_dir")
-    for p, f in found.items():
-        print(f"  {p}: {f} ({os.path.getsize(f) / 1e6:.0f} MB)")
+    out = d["source_dir"] or raw_dir(cfg)
+    found = {}
+    for particle in d["particles"]:
+        info = d["files"][particle]
+        dest = os.path.join(out, f"{particle}.hdf5")
+        have = os.path.exists(dest)
+        if d["source_dir"] or cfg.get("smoke"):
+            if not have:
+                raise RuntimeError(f"{dest} not found (data.source_dir is set, so nothing is downloaded)")
+        elif not have or os.path.getsize(dest) != info["bytes"]:
+            fetch(d["url"].format(id=info["id"]), dest, info["bytes"])
+        if not (d["source_dir"] or cfg.get("smoke")):
+            digest = sha256sum(dest)
+            if digest != info["sha256"]:
+                os.remove(dest)   # a corrupt file would otherwise be resumed from forever
+                raise RuntimeError(f"{dest}: sha256 {digest} != {info['sha256']}; deleted, run the download again")
+        print(f"  {particle}: {dest} ({os.path.getsize(dest) / 1e6:.0f} MB)")
+        found[particle] = dest
     return found
 
 
 def download(cfg):
     if cfg.get("family") == "calogan":
-        return check_calogan(cfg)
+        return download_calogan(cfg)
     return download_calo(cfg) if cfg["dataset"] == "calo" else download_qg(cfg)

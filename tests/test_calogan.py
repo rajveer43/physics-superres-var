@@ -184,6 +184,73 @@ def test_shower_observables_fractions_and_depth():
     assert np.allclose(o["e_vis_ratio"] * 1e5, o["e_vis"])
 
 
+# ------------------------------------------------------------------ download
+def _fake_download_cfg(tmp_path, payload):
+    import hashlib
+    files = {p: {"id": p, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+             for p in ("eplus", "gamma", "piplus")}
+    return get_config("calogan", {"paths.raw_root": str(tmp_path), "data.files": files,
+                                  "data.url": "http://example.invalid/{id}"})
+
+
+def test_download_fetches_missing_files_and_verifies_sha256(tmp_path, monkeypatch):
+    from superres import download
+    payload = b"HDF fake payload" * 10
+    calls = []
+
+    def fake_fetch(url, dest, expected_size=None):
+        calls.append(url)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(payload)
+
+    monkeypatch.setattr(download, "fetch", fake_fetch)
+    cfg = _fake_download_cfg(tmp_path, payload)
+    found = download.download(cfg)
+    assert sorted(found) == ["eplus", "gamma", "piplus"] and len(calls) == 3
+    assert calls[0] == "http://example.invalid/eplus"
+    download.download(cfg)          # complete files are not fetched again
+    assert len(calls) == 3
+
+
+def test_download_deletes_a_corrupt_file(tmp_path, monkeypatch):
+    from superres import download
+
+    def bad_fetch(url, dest, expected_size=None):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(b"X" * 160)     # right size, wrong content
+
+    monkeypatch.setattr(download, "fetch", bad_fetch)
+    cfg = _fake_download_cfg(tmp_path, b"HDF fake payload" * 10)
+    with pytest.raises(RuntimeError, match="sha256"):
+        download.download(cfg)
+    assert not os.path.exists(os.path.join(str(tmp_path), "calogan", "eplus.hdf5"))
+
+
+def test_download_with_source_dir_never_fetches(tmp_path, monkeypatch):
+    from superres import download
+    monkeypatch.setattr(download, "fetch", lambda *a, **k: pytest.fail("must not download"))
+    cfg = get_config("calogan", {"data.source_dir": str(tmp_path)})
+    with pytest.raises(RuntimeError, match="not found"):
+        download.download(cfg)
+
+
+def test_configured_hashes_match_the_local_files():
+    import hashlib
+    if not os.path.exists(os.path.join(REAL, "eplus.hdf5")):
+        pytest.skip("dataset/ not present")
+    cfg = get_config("calogan")
+    for particle, info in cfg["data"]["files"].items():
+        path = os.path.join(REAL, f"{particle}.hdf5")
+        assert os.path.getsize(path) == info["bytes"]
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 24), b""):
+                h.update(chunk)
+        assert h.hexdigest() == info["sha256"]
+
+
 # ------------------------------------------------------------------ no leakage
 def test_no_truth_in_model_inputs(tmp_path):
     """What the SR model and the taggers are fed (HR / LR images and the condition vector g) is a function of the

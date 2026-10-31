@@ -10,7 +10,7 @@ GPU_MEM=40                    # 40 | 80 (80 GB A100s are fewer, so they may queu
 
 # ---- what to run ---------------------------------------------------------------------------------
 DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2) | calogan (CaloGAN e+/gamma/pi+, 3 layers)
-                              # calogan: put eplus.hdf5 gamma.hdf5 piplus.hdf5 in $ROOT/raw/calogan (or EXTRA_SET="data.source_dir=/path"),
+                              # calogan: the three .hdf5 files download themselves (or EXTRA_SET="data.source_dir=/path" to use your own),
                               # LEVELS="lr2 lr4 lr8", and see README_PERLMUTTER.md "CaloGAN"
 VERSION=v2
 RUN_TAG=multiseed             # what this experiment tests, in words joined by '-' (letters, digits, '-', '.')
