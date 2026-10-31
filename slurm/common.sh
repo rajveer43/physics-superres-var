@@ -95,6 +95,10 @@ tagger_kinds() {
         for l in "${LEVEL_LIST[@]}"; do echo "lr:$l"; done
     else
         for l in "${LEVEL_LIST[@]}"; do echo "sr:$l"; done
+        # calogan: the k-NN template baseline is written by the generate job
+        if [[ "$DATASET" == calogan ]]; then
+            for l in "${LEVEL_LIST[@]}"; do echo "template:$l"; done
+        fi
     fi
 }
 

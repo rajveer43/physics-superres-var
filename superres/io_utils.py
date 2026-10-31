@@ -25,7 +25,7 @@ Layout (all names are stable, so later stages can find earlier outputs):
 name    : {dataset}_{version}_{date}_{tag}, e.g. qg_v2_2026-10-06_multiseed. Every file name starts with it
           (figures: {name}_{model or level}_{what}.png), so a file copied elsewhere still says where it is from.
           '_' separates fields, '-' joins words inside a field.
-input   : hr | lr-{level} | sr-{level} | uniform-{level} | srproj-{level}
+input   : hr | lr-{level} | sr-{level} | uniform-{level} | srproj-{level} | template-{level} | ridge-{level}
 Every figure is written as .png and .pdf.
 """
 import csv
@@ -77,12 +77,13 @@ _RUNS = {"vqvae": ("models", "vqvae_tokenizer"), "var": ("models", "var_transfor
 
 
 def tagger_arch(cfg):
-    """cnn | resnet18 (runs from before tagger.arch existed are cnn)."""
-    return "resnet18" if cfg.get("tagger", {}).get("arch", "cnn") == "resnet18" else "cnn"
+    """cnn | resnet18 | layerstack (runs from before tagger.arch existed are cnn)."""
+    arch = cfg.get("tagger", {}).get("arch", "cnn")
+    return arch if arch in ("resnet18", "layerstack") else "cnn"
 
 
 def _tagger_name(cfg):
-    task = "tagger" if cfg.get("tagger", {}).get("task", "classification") == "classification" else "regressor"
+    task = "tagger" if cfg.get("tagger", {}).get("task", "classification") in ("classification", "pid") else "regressor"
     return f"{tagger_arch(cfg)}_{task}"
 
 
@@ -93,7 +94,7 @@ def tagger_tag(cfg):
 
 def tagger_title(cfg):
     """The tagger in figure titles and report headings, e.g. ResNet-18 tagger."""
-    return f"{ {'cnn': 'CNN', 'resnet18': 'ResNet-18'}[tagger_arch(cfg)]} {_tagger_name(cfg).split('_')[1]}"
+    return f"{ {'cnn': 'CNN', 'resnet18': 'ResNet-18', 'layerstack': 'LayerStack'}[tagger_arch(cfg)]} {_tagger_name(cfg).split('_')[1]}"
 
 
 def run_folder(cfg, stage, variant=None, seed=None):

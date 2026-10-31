@@ -7,20 +7,26 @@ import torch.nn as nn
 from .nn_utils import ConvNd, ResBlock, conv_out, norm
 
 
+def conv_body(ndim, in_ch, input_shape, widths, circ=()):
+    """Residual conv stages that halve an axis while it is >= 8 cells, then global average pooling.
+    Returns (module -> (B, c), c)."""
+    layers, c, cur = [ConvNd(ndim, in_ch, widths[0], circular_dims=circ)], widths[0], list(input_shape)
+    for w in widths:
+        layers.append(ResBlock(ndim, c, w, circ))
+        c = w
+        stride = tuple(2 if s >= 8 else 1 for s in cur)
+        if any(st > 1 for st in stride):
+            layers.append(ConvNd(ndim, c, c, 3, stride=stride, circular_dims=circ))
+            cur = [conv_out(s, st) for s, st in zip(cur, stride)]
+    pool = nn.AdaptiveAvgPool2d(1) if ndim == 2 else nn.AdaptiveAvgPool3d(1)
+    layers += [norm(c), nn.SiLU(), pool, nn.Flatten()]
+    return nn.Sequential(*layers), c
+
+
 class Tagger(nn.Module):
     def __init__(self, ndim, in_ch, input_shape, widths, out_dim=1, dropout=0.1, circ=(), n_global=0):
         super().__init__()
-        layers, c, cur = [ConvNd(ndim, in_ch, widths[0], circular_dims=circ)], widths[0], list(input_shape)
-        for w in widths:
-            layers.append(ResBlock(ndim, c, w, circ))
-            c = w
-            stride = tuple(2 if s >= 8 else 1 for s in cur)
-            if any(st > 1 for st in stride):
-                layers.append(ConvNd(ndim, c, c, 3, stride=stride, circular_dims=circ))
-                cur = [conv_out(s, st) for s, st in zip(cur, stride)]
-        pool = nn.AdaptiveAvgPool2d(1) if ndim == 2 else nn.AdaptiveAvgPool3d(1)
-        layers += [norm(c), nn.SiLU(), pool, nn.Flatten()]
-        self.body = nn.Sequential(*layers)
+        self.body, c = conv_body(ndim, in_ch, input_shape, widths, circ)
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(c + n_global, c), nn.SiLU(),
                                   nn.Dropout(dropout), nn.Linear(c, out_dim))
 
@@ -29,6 +35,26 @@ class Tagger(nn.Module):
         if g is not None:
             h = torch.cat([h, g], 1)
         return self.head(h)
+
+
+class LayerStackTagger(nn.Module):
+    """Shower-level model for the three CaloGAN layers, which live on different grids: one small conv stem per
+    layer, the pooled features concatenated with the global (log layer energy) inputs, then an MLP head.
+    forward(xs, g): xs = list of (B, 1, n_phi, n_eta) tensors, one per layer."""
+
+    def __init__(self, shapes, widths, out_dim=3, dropout=0.2, n_global=0):
+        super().__init__()
+        stems = [conv_body(2, 1, shape, widths) for shape in shapes]
+        self.stems = nn.ModuleList(m for m, _ in stems)
+        c = sum(c for _, c in stems) + n_global
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(c, 2 * widths[-1]), nn.SiLU(),
+                                  nn.Dropout(dropout), nn.Linear(2 * widths[-1], out_dim))
+
+    def forward(self, xs, g=None):
+        h = [stem(x) for stem, x in zip(self.stems, xs)]
+        if g is not None:
+            h.append(g)
+        return self.head(torch.cat(h, 1))
 
 
 class BasicBlock(nn.Module):

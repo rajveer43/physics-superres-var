@@ -39,6 +39,8 @@ LABEL_KEYS = ("y", "Y", "label", "labels", "target", "targets")
 def hit_threshold(cfg):
     """Readout threshold in data units: a cell below it counts as empty."""
     d = cfg["data"]
+    if "hit_threshold_mev" in d:  # calogan layers
+        return d["hit_threshold_mev"]
     return d["voxel_threshold_mev"] if cfg["dataset"] == "calo" else d["occupancy_threshold"]
 
 
@@ -201,9 +203,11 @@ def _preprocess(X, pad):
     return X.astype(np.float32), neg
 
 
-def _write_cache(cfg, chunks, split_id, rng):
+def _write_cache(cfg, chunks, split_id, rng, extras=None):
     """chunks yields (X_native (k,C,*native), target (k,)) in row order;
-    split_id[r] in {0,1,2} assigns row r to train/val/test."""
+    split_id[r] in {0,1,2} assigns row r to train/val/test. extras: name -> (N_rows, ...) array stored as
+    {split}_{name}.npy in the same event order (the shuffle depends only on split_id and the rng seed, so
+    separate calls with the same split_id and a fresh rng of the same seed order their events identically)."""
     d = cfg["data"]
     out = cache_dir(cfg)
     C, hr = len(d["channels"]), tuple(d["hr_shape"])
@@ -243,6 +247,11 @@ def _write_cache(cfg, chunks, split_id, rng):
         a.flush()
     for s in SPLITS:
         np.save(os.path.join(out, f"{s}_target.npy"), tgt[s])
+        for name, arr in (extras or {}).items():
+            rows = np.where(split_id == SPLITS.index(s))[0]
+            ordered = np.zeros((counts[s], *arr.shape[1:]), dtype=arr.dtype)
+            ordered[pos[rows]] = arr[rows]
+            np.save(os.path.join(out, f"{s}_{name}.npy"), ordered)
     return counts, float(np.mean(negs)) if negs else 0.0
 
 
@@ -250,7 +259,7 @@ def _finish_meta(cfg, counts, extra):
     d = cfg["data"]
     out = cache_dir(cfg)
     hr = np.load(os.path.join(out, "train_hr.npy"), mmap_mode="r")
-    sample = np.asarray(hr[: min(2000, len(hr))])
+    sample = np.asarray(hr[: min(d.get("scale_events", 2000), len(hr))])
     scales = []
     for c in range(sample.shape[1]):
         v = sample[:, c][sample[:, c] > 0]
@@ -337,8 +346,100 @@ def prepare_calo(cfg):
                                       "negative_fraction_clipped": neg})
 
 
+def calogan_split_ids(particle, e_inc_gev, fractions, n_bins, rng):
+    """0/1/2 = train/val/test for every event, stratified by particle x E_inc bin (1-100 GeV)."""
+    ebin = np.clip(((e_inc_gev - 1.0) / 99.0 * n_bins).astype(int), 0, n_bins - 1)
+    fr = np.asarray(fractions, dtype=float) / sum(fractions)
+    split_id = np.full(len(particle), 2)
+    for p in np.unique(particle):
+        for b in range(n_bins):
+            rows = np.where((particle == p) & (ebin == b))[0]
+            rows = rows[rng.permutation(len(rows))]
+            n_tr, n_va = int(round(fr[0] * len(rows))), int(round(fr[1] * len(rows)))
+            split_id[rows[:n_tr]] = 0
+            split_id[rows[n_tr:n_tr + n_va]] = 1
+    return split_id
+
+
+def calogan_condition(layers):
+    """Measured shower summary the layer models may be conditioned on: log1p(E_layer / MeV) and the layer
+    fractions (N, 6). Sum-pooling conserves layer energies, so this is identical at every LR level."""
+    e = np.stack([layers[k].reshape(len(layers[k]), -1).sum(1) for k in sorted(layers)], 1).astype(np.float64)
+    frac = e / np.maximum(e.sum(1, keepdims=True), 1e-12)
+    return np.concatenate([np.log1p(e), frac], 1).astype(np.float32)
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def prepare_calogan(cfg):
+    """One read of eplus / gamma / piplus .hdf5 -> HR / LR caches of all three layers with identical splits
+    (calogan_l0, _l1, _l2 under cache_root), plus per-event particle, overflow, condition vector and E_inc."""
+    import h5py
+    from .config import layer_configs
+    d = cfg["data"]
+    src = d["source_dir"] or os.path.join(cfg["paths"]["raw_root"], "calogan")
+    files = [os.path.join(src, f"{p}.hdf5") for p in d["particles"]]
+    missing = [f for f in files if not os.path.exists(f)]
+    if missing:
+        raise RuntimeError(f"CaloGAN files not found: {missing} - copy them to {src} or set data.source_dir")
+    cfgs = layer_configs(cfg)
+    names = sorted(cfgs)                      # calogan_l0, _l1, _l2
+    rng = np.random.default_rng(cfg["seed"])
+    layers = {n: [] for n in names}
+    particle, energy, overflow = [], [], []
+    for label, path in enumerate(files):
+        with h5py.File(path, "r") as h:
+            n = h["energy"].shape[0]
+            cap = d["max_per_particle"] or n
+            idx = np.sort(rng.choice(n, min(n, cap), replace=False))
+            for i, name in enumerate(names):
+                layers[name].append(np.asarray(h[f"layer_{i}"][:], dtype=np.float32)[idx])
+            energy.append(np.asarray(h["energy"][:], dtype=np.float64).reshape(-1)[idx])
+            overflow.append(np.asarray(h["overflow"][:], dtype=np.float32)[idx])
+            particle.append(np.full(len(idx), label, dtype=np.int8))
+    layers = {k: np.concatenate(v) for k, v in layers.items()}
+    particle, energy, overflow = np.concatenate(particle), np.concatenate(energy), np.concatenate(overflow)
+    split_id = calogan_split_ids(particle, energy, d["split"], d["n_energy_bins"], rng)
+    extras = {"particle": particle, "overflow": overflow, "cond": calogan_condition(layers)}
+    sources = [{"path": f, "bytes": os.path.getsize(f), "sha256": _sha256(f)} for f in files]
+    thr = d["threshold_scan_mev"]
+    metas = {}
+    for name in names:
+        lc = cfgs[name]
+        X = layers[name][:, None]
+
+        def chunks(X=X, chunk=5000):
+            for s in range(0, len(X), chunk):
+                yield X[s:s + chunk], energy[s:s + chunk] * 1000.0     # E_inc in MeV, like the layer cells
+
+        counts, neg = _write_cache(lc, chunks(), split_id, np.random.default_rng(cfg["seed"]), extras)
+        scan = {d["particles"][p]: {str(t): float((X[particle == p] > t).mean()) for t in thr}
+                for p in range(len(d["particles"]))}
+        prof = X[particle == 0][:5000, 0].mean(0)
+        metas[name] = _finish_meta(lc, counts, {
+            "source_files": sources, "energy_unit": "MeV", "layer": name, "particles": d["particles"],
+            "axes": ["phi", "eta"], "negative_fraction_clipped": neg, "occupancy_scan": scan,
+            "beam_centre_bins": [[int(i) for i in np.argsort(prof.sum(1 - a))[-2:]] for a in (0, 1)]})
+        print(f"  {name}: {counts}")
+    return metas[names[0]]
+
+
 def prepare(cfg, force=False):
     meta_path = os.path.join(cache_dir(cfg), "meta.json")
+    if cfg.get("family") == "calogan":   # one read of the HDF5 files writes the caches of all three layers
+        from .config import layer_configs
+        metas = [os.path.join(cache_dir(c), "meta.json") for c in layer_configs(cfg).values()]
+        if all(os.path.exists(m) for m in metas) and not force:
+            print(f"cache exists: {metas}")
+            return io_utils.load_json(metas[0])
+        return prepare_calogan(cfg)
     if os.path.exists(meta_path) and not force:
         print(f"cache exists: {meta_path}")
         return io_utils.load_json(meta_path)
@@ -388,7 +489,9 @@ class CacheStore:
     'srsample:<level>' / 'srgreedy:<level>'   the two decoding modes explicitly
     'srproj:<level>'     model output rescaled so each coarse cell matches the measurement (diagnostic)
     'uniform:<level>'    coarse energy spread evenly over the fine pixels (diagnostic)
-    'vqrec:<level>'      HR -> tokens -> HR by the tokenizer alone, decoded with that level's LR (diagnostic)"""
+    'vqrec:<level>'      HR -> tokens -> HR by the tokenizer alone, decoded with that level's LR (diagnostic)
+    'template:<level>' / 'ridge:<level>'   no-generative baselines (calogan): k-NN template and ridge regression
+                         from the LR image, both with exact LR closure (written by the baselines stage)"""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -402,6 +505,31 @@ class CacheStore:
         self.hr_shape = tuple(self.meta["hr_shape"])
         self.C = len(self.meta["channels"])
         self.tag = io_utils.model_tag(cfg)
+        self._train_idx = None
+        keep = cfg["data"].get("train_particles")
+        if keep is not None and os.path.exists(self.path("train", "particle")):
+            # SR trained on some particles only (cross-class test): the energy scale uses those events too
+            sel = np.where(np.isin(self._mm("train", "particle"), keep))[0]
+            self._train_idx = sel
+            hr = self._mm("train", "hr")
+            sample = np.asarray(hr[sel[: cfg["data"].get("scale_events", 2000)]])
+            self.scale = np.asarray([float(sample[:, c][sample[:, c] > 0].mean()) for c in range(sample.shape[1])],
+                                    dtype=np.float32)
+
+    def n_train(self):
+        return self.meta["n"]["train"] if self._train_idx is None else len(self._train_idx)
+
+    def particle(self, split):
+        return np.load(self.path(split, "particle"))
+
+    def overflow(self, split):
+        return np.load(self.path(split, "overflow"))
+
+    def baseline_path(self, split, name, level):
+        return self.path(split, f"base-{name}_{level}")
+
+    def has_baseline(self, split, name, level):
+        return os.path.exists(self.baseline_path(split, name, level))
 
     def path(self, split, what):
         return os.path.join(self.dir, f"{split}_{what}.npy")
@@ -460,6 +588,8 @@ class CacheStore:
             return lr
         if method == "uniform":
             return _Lazy(functools.partial(uniform_upsample, f=f), lr)
+        if method in ("template", "ridge"):
+            return _Lazy(_same, np.load(self.baseline_path(split, method, level), mmap_mode="r"))
         if method not in ("sr", "srproj", "srsample", "srgreedy"):
             raise ValueError(f"unknown kind {kind}")
         sr = np.load(self.sr_path(split, level, self.sr_decode(method)), mmap_mode="r")
@@ -470,14 +600,20 @@ class CacheStore:
 
 class SRDataset(Dataset):
     """Normalised HR (and LR) pairs for VQ-VAE / VAR training.
-    level: one level name -> item["lr"]; a list of names -> item["lr:<level>"] for each."""
+    level: one level name -> item["lr"]; a list of names -> item["lr:<level>"] for each.
+    calogan: item["g"] is the measured shower summary (layer energies and fractions) the VAR is conditioned on."""
 
-    def __init__(self, store, split, level=None, max_n=None):
+    def __init__(self, store, split, level=None, max_n=None, all_events=False):
+        """all_events: ignore data.train_particles (generation must cover every event of the split)."""
         self.store, self.split = store, split
         self.single = isinstance(level, str)
         self.levels = [level] if self.single else list(level or [])
-        self.n = store.meta["n"][split] if max_n is None else min(max_n, store.meta["n"][split])
-        self._hr, self._lr = None, {}
+        filtered = split == "train" and not all_events and store._train_idx is not None
+        total = store.n_train() if filtered else store.meta["n"][split]
+        self.n = total if max_n is None else min(max_n, total)
+        self.idx = store._train_idx if filtered else None
+        self._hr, self._lr, self._g = None, {}, None
+        self.use_g = os.path.exists(store.path(split, "cond")) and store.cfg.get("var", {}).get("cond_dim", 0) > 0
 
     def __len__(self):
         return self.n
@@ -486,11 +622,16 @@ class SRDataset(Dataset):
         if self._hr is None:
             self._hr = self.store.array(self.split, "hr")
             self._lr = {lvl: self.store.array(self.split, f"lr:{lvl}") for lvl in self.levels}
-        out = {"hr": torch.from_numpy(normalize(np.asarray(self._hr[i], np.float32), self.store.scale))}
+            if self.use_g:
+                self._g = self.store._mm(self.split, "cond")
+        j = int(self.idx[i]) if self.idx is not None else i
+        out = {"hr": torch.from_numpy(normalize(np.asarray(self._hr[j], np.float32), self.store.scale))}
         for lvl, arr in self._lr.items():
             vol = self.store.vol(f"lr:{lvl}")
-            x = torch.from_numpy(normalize(np.asarray(arr[i], np.float32), self.store.scale, vol))
+            x = torch.from_numpy(normalize(np.asarray(arr[j], np.float32), self.store.scale, vol))
             out["lr" if self.single else f"lr:{lvl}"] = x
+        if self.use_g:
+            out["g"] = torch.from_numpy(np.array(self._g[j], np.float32))
         return out
 
 

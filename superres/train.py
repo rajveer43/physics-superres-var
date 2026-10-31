@@ -336,7 +336,8 @@ def _var_batch(vq, b, dev, amp):
         idx = vq.img_to_idx(x)
         x_in = vq.vq.idx_to_var_input(idx)
     gt = torch.cat([i.flatten(1) for i in idx], 1)
-    return lr, x_in, gt
+    g = b["g"].to(dev, non_blocking=True) if "g" in b else None   # measured shower summary (calogan)
+    return lr, x_in, gt, g
 
 
 @torch.no_grad()
@@ -345,9 +346,9 @@ def _eval_var(model, vq, dl, dev, amp):
     ce, correct, correct_last, n_tok, n_last = 0.0, 0, 0, 0, 0
     b_last, _ = model.begin_ends[-1]
     for b in dl:
-        lr, x_in, gt = _var_batch(vq, b, dev, amp)
+        lr, x_in, gt, g = _var_batch(vq, b, dev, amp)
         with amp.ctx():
-            logits = model(lr, x_in)
+            logits = model(lr, x_in, g)
         logits = logits.float()
         ce += F.cross_entropy(logits.reshape(-1, model.V), gt.reshape(-1), reduction="sum").item()
         pred = logits.argmax(-1)
@@ -391,9 +392,9 @@ def train_var(cfg, level, trial=None, epochs=None, max_train=None, save=True, re
         t0, run_loss = time.time(), 0.0
         for b in dl_tr:
             lr_now = set_lr(opt, step, total, vc["lr"], warm)
-            lr, x_in, gt = _var_batch(vq, b, dev, amp)
+            lr, x_in, gt, g = _var_batch(vq, b, dev, amp)
             with amp.ctx():
-                logits = model(lr, x_in)
+                logits = model(lr, x_in, g)
             loss = F.cross_entropy(logits.float().reshape(-1, model.V), gt.reshape(-1),
                                    label_smoothing=vc["label_smoothing"])
             amp.step(loss, opt, model.parameters())
@@ -449,12 +450,13 @@ def generate_sr(cfg, level, splits=None, decodes=None):
                     print(f"  {level} {split} [{decode}]: {have} events already generated - skipping "
                           f"(set var.gen_overwrite=true after retraining the model)")
                     continue
-            ds = SRDataset(store, split, level, max_n=n)
+            ds = SRDataset(store, split, level, max_n=n, all_events=True)
             out = open_memmap(path + ".tmp", "w+", dtype, (n, store.C, *store.hr_shape))
             i, t0 = 0, time.time()
             for b in loader(ds, vc["gen_batch_size"], False, cfg):
+                g = b["g"].to(dev) if "g" in b else None
                 with amp.ctx():
-                    z = model.generate(b["lr"].to(dev), vq, vc["temperature"], vc["top_k"], decode == "greedy", gen)
+                    z = model.generate(b["lr"].to(dev), vq, vc["temperature"], vc["top_k"], decode == "greedy", gen, g)
                 E = to_energy(z.float(), s).cpu().numpy()
                 out[i:i + len(E)] = E.astype(dtype)
                 i += len(E)

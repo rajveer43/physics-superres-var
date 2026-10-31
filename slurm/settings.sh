@@ -9,7 +9,9 @@ QOS=shared                    # shared (1 GPU, charged per GPU: recommended) | r
 GPU_MEM=40                    # 40 | 80 (80 GB A100s are fewer, so they may queue longer)
 
 # ---- what to run ---------------------------------------------------------------------------------
-DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2)
+DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2) | calogan (CaloGAN e+/gamma/pi+, 3 layers)
+                              # calogan: put eplus.hdf5 gamma.hdf5 piplus.hdf5 in $ROOT/raw/calogan (or EXTRA_SET="data.source_dir=/path"),
+                              # LEVELS="lr2 lr4 lr8", and see README_PERLMUTTER.md "CaloGAN"
 VERSION=v2
 RUN_TAG=multiseed             # what this experiment tests, in words joined by '-' (letters, digits, '-', '.')
 RUN_DATE=                     # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-06 to resume one

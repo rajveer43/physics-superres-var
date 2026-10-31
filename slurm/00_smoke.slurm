@@ -16,11 +16,11 @@ job_header "smoke test"
 raw="$ROOT/raw/$DATASET"
 if [[ -z "$(ls -A "$raw" 2> /dev/null)" ]]; then
     echo "writing synthetic $DATASET data to $raw"
-    python -c "import sys; from tests.smoke_test import fake_qg, fake_calo; \
-(fake_qg if sys.argv[1] == 'qg' else fake_calo)(sys.argv[2])" "$DATASET" "$raw"
+    python -c "import sys; from tests.smoke_test import fake_qg, fake_calo, fake_calogan; \
+{'qg': fake_qg, 'calo': fake_calo, 'calogan': fake_calogan}[sys.argv[1]](sys.argv[2])" "$DATASET" "$raw"
 fi
 
-run_pipeline prepare,train_vqvae,train_var,generate,eval_sr,train_taggers,tagger_xeval,summarize --smoke
+run_pipeline prepare,train_vqvae,train_var,generate,baselines,eval_sr,train_taggers,tagger_xeval,summarize --smoke
 
 exp="$(experiment_dir)"
 pfx="$(prefix)"
@@ -35,12 +35,23 @@ check() {
 }
 echo "checking outputs in $exp"
 check "$exp/summary/${pfx}_report.md"
-check "$exp/summary/${pfx}_*-tagger-2x3_*.csv"
-check "$exp/summary/figures/${pfx}_*-tagger-curves_*.png"
-check "$exp/evaluation/sr_*/paired.csv"
-check "$exp/models/vqvae_tokenizer/best.pt"
-check "$exp/models/var_transformer_*/best.pt"
-check "$exp/models/cnn_*_sr-*_seed*/best.pt"
+if [[ "$DATASET" == calogan ]]; then
+    check "$exp/summary/${pfx}_*-tagger-2x3-*.csv"
+    check "$exp/evaluation/sr_*/observables_by_class.csv"
+    check "$exp/models/layerstack_*_sr-*_seed*/best.pt"
+    for L in calogan_l0 calogan_l1 calogan_l2; do
+        check "$ROOT/experiments/$L/$EXPERIMENT/models/vqvae_tokenizer/best.pt"
+        check "$ROOT/experiments/$L/$EXPERIMENT/models/var_transformer_*/best.pt"
+        check "$ROOT/experiments/$L/$EXPERIMENT/evaluation/sr_*/paired.csv"
+    done
+else
+    check "$exp/summary/${pfx}_*-tagger-2x3_*.csv"
+    check "$exp/summary/figures/${pfx}_*-tagger-curves_*.png"
+    check "$exp/evaluation/sr_*/paired.csv"
+    check "$exp/models/vqvae_tokenizer/best.pt"
+    check "$exp/models/var_transformer_*/best.pt"
+    check "$exp/models/cnn_*_sr-*_seed*/best.pt"
+fi
 check "$exp/run_info.json"
 ((missing == 0)) || die "smoke test finished but outputs are missing (see above)"
 echo "SMOKE OK"

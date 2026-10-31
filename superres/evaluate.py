@@ -25,11 +25,12 @@ from matplotlib.colors import LogNorm  # noqa: E402
 from . import io_utils  # noqa: E402
 from . import metrics as M  # noqa: E402
 from .data import LEGACY_KINDS, CacheStore, hit_threshold  # noqa: E402
-from .observables import GRID_DEPENDENT, cell_spectrum, jet_observables, shower_observables  # noqa: E402
+from .observables import (GRID_DEPENDENT, cell_spectrum, jet_observables, layer_observables,  # noqa: E402
+                          shower_observables)
 from .physics_ops import sum_pool  # noqa: E402
 
 KIND = {"lr": "lr", "sr": "sr", "sr-sample": "srsample", "sr-greedy": "srgreedy",
-        "uniform": "uniform", "srproj": "srproj"}
+        "uniform": "uniform", "srproj": "srproj", "template": "template", "ridge": "ridge"}
 STYLE = {
     "hr": dict(color="0.3", label="HR (truth)"),
     "lr": dict(color="tab:red", label="LR (input)"),
@@ -39,9 +40,12 @@ STYLE = {
     "sr-sample": dict(color="tab:purple", label="SR, sampled tokens"),
     "uniform": dict(color="tab:orange", label="Uniform upsample"),
     "srproj": dict(color="tab:cyan", label="SR + energy constraint"),
+    "template": dict(color="tab:olive", label="k-NN template (no learning)"),
+    "ridge": dict(color="tab:pink", label="Ridge regression LR→HR"),
 }
-ORDER = ["hr", "lr", "sr", "vqrec", "sr-greedy", "sr-sample", "uniform", "srproj"]
-RELATIVE = {"qg": ("sum_", "jet_pt", "jet_mass"), "calo": ("e_total", "e_ratio")}
+ORDER = ["hr", "lr", "sr", "template", "ridge", "vqrec", "sr-greedy", "sr-sample", "uniform", "srproj"]
+RELATIVE = {"qg": ("sum_", "jet_pt", "jet_mass"), "calo": ("e_total", "e_ratio"),
+            "calogan": ("e_layer", "e_ratio", "e_vis")}
 
 
 def _style(m):
@@ -58,13 +62,47 @@ def _comparable(m, name):
 
 
 PAIRED_PLOTS = {"qg": ("sum_tracks", "sum_all", "jet_pt", "jet_mass", "girth", "dR_std", "n_hits"),
-                "calo": ("e_total", "depth_centroid", "r_width", "n_hits")}
+                "calo": ("e_total", "depth_centroid", "r_width", "n_hits"),
+                "calogan": ("e_ratio", "eta_width", "phi_width", "n_hits", "core2d_80mm", "eratio")}
+
+
+def family(cfg):
+    return cfg.get("family", cfg["dataset"])
 
 
 def _observables(cfg, store, E, factor, e_inc):
-    if cfg["dataset"] == "qg":
+    fam = family(cfg)
+    if fam == "qg":
         return jet_observables(E, factor, cfg["data"], cfg["eval"].get("nsub_max", 0))
+    if fam == "calogan":
+        return layer_observables(E, factor, cfg["data"], e_inc)
     return shower_observables(E, factor, cfg["data"], e_inc)
+
+
+def has_values(v):
+    return v is not None and np.isfinite(v).any()
+
+
+def by_class_table(ref, other, particle, e_inc_gev, names, fam, level, method, n_bins, particles, min_events=20):
+    """compare_distributions per particle (all energies) and per particle x E_inc bin, same events in ref and other."""
+    edges = np.linspace(1.0, 100.0, n_bins + 1)
+    rows = []
+    for pi in [None, *range(len(particles))]:
+        pm = np.ones(len(particle), bool) if pi is None else particle == pi
+        pname = "all" if pi is None else particles[pi]
+        bins = [(None, pm)] + [((lo, hi), pm & (e_inc_gev >= lo) & (e_inc_gev < hi + (1e-9 if hi == 100.0 else 0)))
+                               for lo, hi in zip(edges[:-1], edges[1:])]
+        for b, m in bins:
+            if m.sum() < min_events:
+                continue
+            for name in names:
+                if name not in other or not (has_values(ref[name]) and has_values(other[name])):
+                    continue
+                rows.append({"level": level, "method": method, "particle": pname,
+                             "e_lo": np.nan if b is None else b[0], "e_hi": np.nan if b is None else b[1],
+                             "n": int(m.sum()), "observable": name,
+                             **M.compare_distributions(ref[name][m], other[name][m], _is_relative(fam, name))})
+    return rows
 
 
 def _resolve_methods(cfg, store, level):
@@ -74,6 +112,8 @@ def _resolve_methods(cfg, store, level):
     def available(m):
         if m in ("lr", "uniform", "vqrec"):
             return True
+        if m in ("template", "ridge"):
+            return store.has_baseline("test", m, level)
         decode = store.sr_decode(KIND[m])
         if m in ("sr-sample", "sr-greedy") and decode == primary:
             return False  # identical to "sr"
@@ -127,6 +167,10 @@ def _ratio_limits(ratios):
 def _hist_with_ratio(ref, others, name, bins, fig_dir, prefix, min_ref=10):
     """Normalised histograms with a ratio panel. Bins with fewer than min_ref HR events get no ratio;
     ratios beyond the panel are drawn on its edge, so a large shift stays visible."""
+    ref = ref[np.isfinite(ref)]
+    others = {m: v[np.isfinite(v)] for m, v in others.items() if has_values(v)}
+    if not len(ref) or not others:
+        return
     lo, hi = _hist_range(ref, others)
     edges = np.linspace(lo, hi, bins + 1)
     fig, (ax, rx) = plt.subplots(2, 1, figsize=(5, 4.6), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
@@ -211,12 +255,16 @@ def _examples(cfg, images, lr_factor, fig_dir, prefix, n):
     """images: dict method -> (n, C, *grid) linear energies. Every panel in a row uses the same
     colour scale. LR is drawn as energy per fine-pixel area, otherwise its merged cells would
     look brighter than the truth for no physical reason."""
-    qg = cfg["dataset"] == "qg"
+    fam = family(cfg)
+    qg = fam == "qg"
 
     def view(E, m):
-        img = E.sum(0) if qg else E[0].sum(1).T  # qg: sum channels; calo: sum over angle -> radius x layer
+        if fam == "calogan":   # one layer: (phi, eta) cells
+            img = E[0]
+        else:
+            img = E.sum(0) if qg else E[0].sum(1).T  # qg: sum channels; calo: sum over angle -> radius x layer
         if m == "lr":
-            img = img / (math.prod(lr_factor) if qg else lr_factor[0] * lr_factor[2])
+            img = img / (math.prod(lr_factor) if qg or fam == "calogan" else lr_factor[0] * lr_factor[2])
         return img
 
     names = [m for m in ORDER if m in images]
@@ -282,7 +330,7 @@ def _channel_panels(cfg, rows, lr_factor, level, fig_dir, prefix, n):
 # --------------------------------------------------------------- evaluation
 def evaluate_level(cfg, level, with_c2st=True):
     store = CacheStore(cfg)
-    ds, ev = cfg["dataset"], cfg["eval"]
+    ds, ev = family(cfg), cfg["eval"]
     run = io_utils.RunDir(cfg, "sreval", level)
     prefix = f"{io_utils.prefix(cfg)}_{level}"
     f = store.levels[level]
@@ -293,10 +341,13 @@ def evaluate_level(cfg, level, with_c2st=True):
     for m in main + diag:  # SR may have been generated for fewer events
         if m in KIND and KIND[m].startswith("sr"):
             n = min(n, len(np.load(store.sr_path("test", level, store.sr_decode(KIND[m])), mmap_mode="r")))
-    e_inc = store.target("test")[:n] if ds == "calo" else None
+    e_inc = store.target("test")[:n] if ds in ("calo", "calogan") else None
+    particle = store.particle("test")[:n] if ds == "calogan" else None
     hr = np.asarray(store.array("test", "hr")[:n], np.float32)
     lr_true = np.asarray(store.array("test", f"lr:{level}")[:n], np.float32)
     ref_s, ref_p = _observables(cfg, store, hr, ones, e_inc)
+    ref_s = {k: v for k, v in ref_s.items() if has_values(v)}   # e.g. the strip observables exist on L0 only
+    by_class = []
     thr = hit_threshold(cfg)
     ref_spec = cell_spectrum(hr, thr)
 
@@ -324,8 +375,12 @@ def evaluate_level(cfg, level, with_c2st=True):
         s, p = _observables(cfg, store, E, f if m == "lr" else ones, e_inc)
         obs[m], profs[m] = s, p
         role = "main" if m in main else "diagnostic"
+        if particle is not None:
+            by_class += by_class_table(ref_s, {k: v for k, v in s.items() if _comparable(m, k)}, particle,
+                                       e_inc / 1000.0, list(ref_s), ds, level, m, ev.get("n_energy_bins", 10),
+                                       cfg["data"]["particles"])
         for name in ref_s:
-            if name in s and _comparable(m, name):
+            if name in s and _comparable(m, name) and has_values(s[name]):
                 rows.append({"dataset": ds, "level": level, "method": m, "role": role, "observable": name,
                              **M.compare_distributions(ref_s[name], s[name], _is_relative(ds, name))})
                 paired.append({"dataset": ds, "level": level, "method": m, "role": role, "observable": name,
@@ -342,6 +397,8 @@ def evaluate_level(cfg, level, with_c2st=True):
         del E
     df = pd.DataFrame(rows)
     df.to_csv(run.file("observables.csv"), index=False)
+    if by_class:
+        pd.DataFrame(by_class).to_csv(run.file("observables_by_class.csv"), index=False)
     pd.DataFrame(paired).to_csv(run.file("paired.csv"), index=False)
 
     c2st = {}
@@ -349,14 +406,20 @@ def evaluate_level(cfg, level, with_c2st=True):
         for m in ev.get("c2st_methods", ["sr"]):
             if m in obs:
                 print(f"  [{level}] classifier two-sample test: HR vs {m}")
-                c2st[m] = c2st_auc(cfg, store, hr, load(m), cfg["seed"])
+                E_m = load(m)
+                c2st[m] = c2st_auc(cfg, store, hr, E_m, cfg["seed"])
+                if particle is not None:   # does the classifier find SR of one particle type easier to spot?
+                    for pi, pname in enumerate(cfg["data"]["particles"]):
+                        sel = particle == pi
+                        if sel.sum() >= 40:
+                            c2st[f"{m}:{pname}"] = c2st_auc(cfg, store, hr[sel], E_m[sel], cfg["seed"])
     run.save_config({"level": level, "n_events": n, "main_methods": main, "diagnostic_methods": diag})
     run.save_metrics({"level": level, "n_events": n, "lr_closure": consistency, "c2st": c2st})
 
     bins = ev["hist_bins"]
     diag_dir = os.path.join(run.fig_dir, "diagnostics")
     def pick(methods, name):
-        return {m: obs[m][name] for m in methods if name in obs[m] and _comparable(m, name)}
+        return {m: obs[m][name] for m in methods if name in obs[m] and _comparable(m, name) and has_values(obs[m][name])}
 
     for name in ref_s:
         _hist_with_ratio(ref_s[name], pick(main, name), name, bins, run.fig_dir, prefix)
@@ -510,7 +573,7 @@ def _table_2x3(long, key, row_order):
     return t.reindex([r for r in row_order if r in t.index])
 
 
-def _plot_2x3(long, key, key_label, row_order, level, cfg):
+def _plot_2x3(long, key, key_label, row_order, level, cfg, extra=""):
     cols = sorted(long["column"].unique())
     rows = [r for r in row_order if r in set(long["evaluated_on"])]
     fig, ax = plt.subplots(figsize=(1.6 * len(rows) + 2.5, 3.6))
@@ -529,7 +592,7 @@ def _plot_2x3(long, key, key_label, row_order, level, cfg):
     ax.set_title(f"{cfg['dataset']} {level}: {io_utils.tagger_title(cfg)} trained on HR (A) vs trained on each input (B)",
                  fontsize=9)
     ax.legend(fontsize=8, frameon=False)
-    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}_{io_utils.tagger_tag(cfg)}-2x3_{level}")
+    io_utils.save_figure(fig, io_utils.summary_dir(cfg, "figures"), f"{io_utils.prefix(cfg)}_{io_utils.tagger_tag(cfg)}-2x3{extra}_{level}")
     plt.close(fig)
 
 
@@ -628,6 +691,10 @@ def summarize(cfg):
                     t = s.pivot_table(index="observable", columns="method", values=["bias", "resolution", "pearson_r"])
                     sections.append((f"{level}: event by event against HR. bias = mean(X - HR) / mean(HR), "
                                      "resolution = std(X - HR) / mean(HR), pearson_r = correlation", t))
+        bc = [pd.read_csv(p) for p in sorted(glob.glob(os.path.join(io_utils.run_glob(cfg, "sreval"),
+                                                                    "observables_by_class.csv")))]
+        if bc:  # calogan: the same comparison per particle and E_inc bin
+            pd.concat(bc, ignore_index=True).to_csv(os.path.join(sdir, f"{pfx}_sr-observables-by-class.csv"), index=False)
         piv = obs.pivot_table(index="observable", columns=["level", "method"], values="w1_over_sigma")
         piv.to_csv(os.path.join(sdir, f"{pfx}_sr-w1-table.csv"))
         sections.append(("Distance to the HR distribution, W1 / sigma_HR (0 = identical)", piv))

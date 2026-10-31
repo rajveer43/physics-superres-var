@@ -38,6 +38,11 @@ exclude=()
 stage_dir="$(mktemp -d)"
 trap 'rm -rf "$stage_dir"' EXIT
 ln -s "$exp" "$stage_dir/$pfx"
+if [[ "$DATASET" == calogan ]]; then   # the per-layer experiments hold the tokenizers, transformers and layer evaluations
+    for L in calogan_l0 calogan_l1 calogan_l2; do
+        [[ -d "$ROOT/experiments/$L/$EXPERIMENT" ]] && ln -s "$ROOT/experiments/$L/$EXPERIMENT" "$stage_dir/${pfx}_$L"
+    done
+fi
 logdir="$(dirname "$RUN_ENV")"
 [[ -d "$logdir" ]] && ln -s "$logdir" "$stage_dir/${pfx}_slurm-logs"
 tar -czhf "$out" ${exclude[@]+"${exclude[@]}"} --exclude='*.tmp' -C "$stage_dir" .

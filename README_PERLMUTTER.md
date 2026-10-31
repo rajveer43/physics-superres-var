@@ -185,3 +185,20 @@ slurm/pack_results.sh      tarball of the results
 slurm/common.sh            shared helpers (paths, environment, the python command line)
 slurm/00_smoke.slurm ... 07_xeval_summary.slurm, tune.slurm   the jobs (submitted by submit_all.sh, not by hand)
 ```
+
+
+## CaloGAN (`DATASET=calogan`)
+
+Three layer experiments and one shower experiment per run, all with the same date, version and tag:
+`$ROOT/experiments/calogan_l{0,1,2}/<experiment>/` (tokenizer, transformers, layer evaluation) and
+`$ROOT/experiments/calogan/<experiment>/` (reassembled-shower evaluation, taggers, summary).
+
+1. Copy `eplus.hdf5`, `gamma.hdf5`, `piplus.hdf5` to `$ROOT/raw/calogan/` (or set `EXTRA_SET="data.source_dir=/path"`).
+2. `settings.sh`: `DATASET=calogan`, `LEVELS="lr2 lr4 lr8"`, `SEEDS="42 43 44"`, `RUN_TAG=first`.
+3. `bash slurm/submit_all.sh --smoke` (synthetic data, debug QOS), then `bash slurm/submit_all.sh`.
+   The generate job also writes the template and ridge baselines of its level; the taggers on `template:<level>` wait for it.
+4. Cross-class test: a second run with `RUN_TAG=eg-only`, `EXTRA_SET="data.train_particles=[0,1] joint.cross_ref_tag=first"`.
+   Tokenizers, transformers and SR are retrained on e+ and gamma only; the report compares pi+ with the first run.
+
+The data are small (300k showers, 504 cells each): the jobs are short compared with qg, so the default wall times are generous.
+`bash slurm/status.sh` lists the per-layer work; `pack_results.sh` packs the shower experiment and the three layer experiments together.

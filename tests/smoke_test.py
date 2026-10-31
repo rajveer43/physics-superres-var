@@ -1,6 +1,6 @@
 """End-to-end check on small synthetic data (no download, runs on CPU in minutes).
 
-    python tests/smoke_test.py --root /tmp/superres_smoke [--dataset qg|calo|both]
+    python tests/smoke_test.py --root /tmp/superres_smoke [--dataset qg|calo|calogan|both|all]
 
 Writes fake raw files in the formats the real loaders expect, then runs every
 pipeline stage with the SMOKE config.
@@ -50,6 +50,33 @@ def fake_calo(raw, n=(2000, 500), seed=0):
             f["incident_energies"] = e
 
 
+def fake_calogan(raw, n=900, seed=0):
+    """Three files in the CaloGAN layout: showers centred on the middle of every layer, e+/gamma narrow and mostly in
+    layers 0-1, pi+ wide with a visible fraction around 0.3 and a share in layer 2."""
+    import h5py
+    rng = np.random.default_rng(seed)
+    os.makedirs(raw, exist_ok=True)
+    shapes = {"layer_0": (3, 96), "layer_1": (12, 12), "layer_2": (12, 6)}
+    sigma_cells = {"layer_0": (0.7, 2.0), "layer_1": (1.0, 1.0), "layer_2": (1.8, 0.9)}   # (phi, eta) in cells
+    for name, width, fracs, vis in (("eplus", 1.0, (0.2, 0.8, 0.002), 0.99), ("gamma", 1.0, (0.15, 0.85, 0.002), 0.99),
+                                    ("piplus", 2.2, (0.1, 0.76, 0.14), 0.3)):
+        e = rng.uniform(1, 100, (n, 1))
+        out = {"energy": e, "overflow": rng.exponential(5.0, (n, 3))}
+        for (k, shape), frac in zip(shapes.items(), fracs):
+            phi = (np.arange(shape[0]) - (shape[0] - 1) / 2)[:, None]
+            eta = (np.arange(shape[1]) - (shape[1] - 1) / 2)[None]
+            sp, se = sigma_cells[k]
+            prof = np.exp(-0.5 * ((phi / (sp * width)) ** 2 + (eta / (se * width)) ** 2))
+            noise = rng.lognormal(0, 0.8, (n, *shape))
+            img = prof[None] * noise
+            img *= (e * 1000 * vis * frac * rng.lognormal(0, 0.1, (n, 1)))[:, :, None] / img.sum((1, 2), keepdims=True)
+            img[img < 0.0151] = 0.0
+            out[k] = img
+        with h5py.File(os.path.join(raw, f"{name}.hdf5"), "w") as f:
+            for key, v in out.items():
+                f[key] = v
+
+
 def check_taggers():
     """ResNet-18 on HR (128) and LR (64) shapes; a config without tagger.arch means the small CNN."""
     import torch
@@ -61,10 +88,31 @@ def check_taggers():
     assert TAGGERS[{}.get("arch", "cnn")] is Tagger
 
 
+def check_calogan_outputs(paths):
+    """The files a calogan run must leave behind (smoke settings: run_date / run_tag unset)."""
+    import glob
+    from superres.config import get_config
+    from superres.io_utils import experiment_root, prefix
+    cfg = get_config("calogan", paths, smoke=True)
+    exp, pfx = experiment_root(cfg), prefix(cfg)
+    expected = [f"{exp}/summary/{pfx}_report.md", f"{exp}/summary/{pfx}_layerstack-tagger-2x3-auc-e-vs-gamma_lr2.csv",
+                f"{exp}/evaluation/sr_lr2/observables_by_class.csv", f"{exp}/evaluation/sr_lr2/correlations.csv",
+                f"{exp}/evaluation/sr_lr2/energy_response.csv", f"{exp}/evaluation/sr_lr2/threshold_scan.csv",
+                f"{exp}/models/layerstack_tagger_hr_seed42/best.pt"]
+    for layer in ("calogan_l0", "calogan_l1", "calogan_l2"):
+        lc = get_config(layer, paths, smoke=True)
+        e = experiment_root(lc)
+        expected += [f"{e}/models/vqvae_tokenizer/best.pt", f"{e}/models/var_transformer_lr2/best.pt",
+                     f"{e}/evaluation/sr_lr2/observables.csv"]
+    missing = [p for p in expected if not glob.glob(p)]
+    assert not missing, f"calogan smoke run is missing: {missing}"
+    print("calogan outputs present")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", default="/tmp/superres_smoke")
-    p.add_argument("--dataset", default="both", choices=["qg", "calo", "both"])
+    p.add_argument("--dataset", default="both", choices=["qg", "calo", "calogan", "both", "all"])
     a = p.parse_args()
     from superres.pipeline import run
     check_taggers()
@@ -72,10 +120,14 @@ def main():
              "paths.cache_root": os.path.join(a.root, "cache"), "num_workers": 0}
     stages = ["prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_var", "generate", "eval_sr",
               "tune_tagger", "train_taggers", "tagger_xeval", "summarize"]
-    for ds in (["qg", "calo"] if a.dataset == "both" else [a.dataset]):
+    for ds in {"both": ["qg", "calo"], "all": ["qg", "calo", "calogan"]}.get(a.dataset, [a.dataset]):
         raw = os.path.join(a.root, "raw", ds)
         if not os.listdir(raw) if os.path.isdir(raw) else True:
-            (fake_qg if ds == "qg" else fake_calo)(raw)
+            {"qg": fake_qg, "calo": fake_calo, "calogan": fake_calogan}[ds](raw)
+        if ds == "calogan":   # three layer datasets + the shower; baselines and the shower stages are part of the run
+            run(ds, ["download"] + stages[:6] + ["baselines"] + stages[6:], overrides=paths, smoke=True)
+            check_calogan_outputs(paths)
+            continue
         run(ds, stages, overrides=paths, smoke=True)
         if ds == "qg":  # the same taggers again with the small CNN, in their own folders
             run(ds, ["train_taggers", "tagger_xeval"], overrides={**paths, "tagger.arch": "cnn"}, smoke=True)

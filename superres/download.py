@@ -22,7 +22,7 @@ DATA_EXTS = (".pt", ".pth", ".parquet", ".h5", ".hdf5", ".npz", ".npy")
 
 
 def raw_dir(cfg):
-    d = os.path.join(cfg["paths"]["raw_root"], cfg["dataset"])
+    d = os.path.join(cfg["paths"]["raw_root"], "calogan" if cfg.get("family") == "calogan" else cfg["dataset"])
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -167,5 +167,22 @@ def download_qg(cfg):
     return files
 
 
+def check_calogan(cfg):
+    """CaloGAN (Mendeley Data, DOI 10.17632/pvn3xc3wy5.1) has no stable direct links, so nothing is downloaded:
+    the three files are looked for in data.source_dir (default {raw_root}/calogan)."""
+    d = cfg["data"]
+    src = d["source_dir"] or raw_dir(cfg)
+    found = {p: os.path.join(src, f"{p}.hdf5") for p in d["particles"]}
+    missing = [f for f in found.values() if not os.path.exists(f)]
+    if missing:
+        raise RuntimeError(f"missing {missing}. Download eplus / gamma / piplus .hdf5 from "
+                           f"https://doi.org/10.17632/pvn3xc3wy5.1 into {src}, or set data.source_dir")
+    for p, f in found.items():
+        print(f"  {p}: {f} ({os.path.getsize(f) / 1e6:.0f} MB)")
+    return found
+
+
 def download(cfg):
+    if cfg.get("family") == "calogan":
+        return check_calogan(cfg)
     return download_calo(cfg) if cfg["dataset"] == "calo" else download_qg(cfg)

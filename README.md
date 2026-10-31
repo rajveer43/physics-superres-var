@@ -9,12 +9,44 @@ observables and by downstream taggers, not by SSIM/PSNR.
 | `qg` | CMS quark/gluon jet images, channels tracks / ECAL / HCAL | 3 x 125 x 125 (padded to 128) | `pool2x2` (64²), `pool4x4` (32²), `pool8x8` (16²) |
 | `calo` | CaloChallenge 2022 Dataset 2, e⁻ showers 1 GeV–1 TeV | 45 layers x 16 angle x 9 radius (padded to 48 layers) | `pool1x2x1`, `pool1x4x3`, `pool3x8x3` |
 
+| `calogan` | CaloGAN EM showers: e+, gamma, pi+ (100k each, 1-100 GeV), three layers on three grids: L0 3 x 96, L1 12 x 12, L2 12 x 6 (phi x eta) | native grid of each layer | `lr2`, `lr4`, `lr8` (per-layer factors, see below) |
+
 Level names give the pooling factor per axis. `pool3x8x3` merges 3 layers x 8 angular x 3 radial cells into one.
 
 **Why only up to the native resolution:** there is no ground truth above
 125 x 125 (qg) or 45 x 16 x 9 (calo). Output beyond those grids could not be
 checked against anything, so the SR target is always the native HR grid, which
 means 2x, 4x and 8x upscaling for jets.
+
+## CaloGAN (`calogan`)
+
+Design and numbers: [docs/calogan_design.md](docs/calogan_design.md). The three layers are not on a common grid, so
+each is its own 2-D dataset (`calogan_l0`, `calogan_l1`, `calogan_l2`: tokenizer, VAR, LR levels, evaluation) and the
+dataset `calogan` brings them together (reassembled showers, PID and energy taggers, closure, cross-class test).
+`--dataset calogan` runs every stage; per-layer stages loop over the layers. A layer can be run alone with
+`--dataset calogan_l1`.
+
+- Data: `eplus.hdf5`, `gamma.hdf5`, `piplus.hdf5` in `{raw_root}/calogan` (or `--set data.source_dir=/path`), no
+  download. Split 80/10/10 stratified by particle x 10 E_inc bins. The same events, in the same order, in all layers.
+- LR levels (phi, eta pooling): `lr2` L0 (1,2) L1 (2,2) L2 (2,1); `lr4` (1,4) (3,3) (3,3); `lr8` (3,8) (6,6) (6,3).
+  Every factor keeps the beam axis on a cell edge; `tests/test_calogan.py` checks this.
+- The VAR is conditioned on the measured layer energies and fractions of the whole shower (6 numbers). E_inc and
+  the overflow never enter an image input.
+- Baselines in every table: `uniform`, `template` (k-NN in LR space), `ridge` (LR -> HR regression), `vqrec`, `srproj`.
+- Shower observables (per particle and per E_inc bin): layer fractions f_0..f_2, E_vis/E_inc, depth, lateral widths per
+  layer, L0 Eratio over 5 mm strips (NaN on coarse eta grids), Reta/Rphi-like core fractions in L1, hit counts,
+  correlations between layers, energy closure, resolution fit sigma/E = a/sqrt(E) (+) b.
+- Taggers: `LayerStackTagger` (one conv stem per layer). PID (3-class: AUC of e+ vs gamma, e+ vs pi+, gamma vs pi+, background
+  rejection at 30/50/70 % signal efficiency) and E_inc regression, on `hr`, `lr:<level>`, `sr:<level>`, `template:<level>`.
+- Cross-class test: run a second experiment with `data.train_particles=[0,1]` and a different `run_tag`, then evaluate with
+  `joint.cross_ref_tag=<run_tag of the all-particle experiment>`; the report lists what SR does to pi+.
+
+```bash
+python -m superres.pipeline --dataset calogan --stages all --set paths.raw_root=/data/raw paths.cache_root=/data/cache \
+    paths.drive_root=/data/experiments data.source_dir=$PWD/dataset run_date=2026-10-30 run_tag=first
+python tests/smoke_test.py --dataset calogan --root /tmp/superres_smoke   # synthetic end-to-end check, CPU
+python -m pytest tests/test_calogan.py                                   # unit tests (+ real-file checks if dataset/ exists)
+```
 
 ## Method
 
@@ -116,6 +148,7 @@ python tests/smoke_test.py --root /tmp/superres_smoke      # synthetic end-to-en
 | `train_vqvae` | Full VQ-VAE training with the tuned parameters; logs hit precision / recall / count ratio | `models/vqvae_tokenizer/` |
 | `tune_var` | Optuna on the hardest level: depth (width = 64·depth), lr, dropout, weight decay, label smoothing | `tuning/<name>_var_transformer_all*` |
 | `train_var` | One conditional VAR per LR level | `models/var_transformer_<level>/` |
+| `baselines` | calogan only: k-NN template and ridge regression LR -> HR, both with exact LR closure | `<cache>/<ds>/<split>_base-<template\|ridge>_<level>.npy` |
 | `generate` | VAR output as generated: `var.decode` (greedy) for the splits in `var.gen_splits`, other decodings in `var.decodes` for test only | `<cache>/<ds>/<split>_<name>_sr-<decode>_<level>.npy` |
 | `eval_sr` | HR vs LR vs SR: observables, W1/KS, per-event bias and resolution, LR closure, C2ST, plots incl. per-channel events; diagnostics in `figures/diagnostics/` | `evaluation/sr_<level>/` |
 | `tune_tagger` | Optuna on HR: lr, dropout, weight decay, width | `tuning/<name>_<tagger>_hr*` |

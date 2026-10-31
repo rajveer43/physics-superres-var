@@ -106,6 +106,13 @@ class ConditionalVAR(nn.Module):
 
         self.lr_enc = LREncoder(ndim, in_ch, var_cfg["lr_enc_widths"], vq_cfg["strides"], D, circ)
         self.cond_mlp = nn.Sequential(nn.Linear(D, D), nn.SiLU(), nn.Linear(D, D))
+        # optional measured side information (calogan: energies of all three layers), added to the AdaLN condition;
+        # starts at zero so the model begins as the plain LR-conditioned VAR
+        self.cond_dim = int(var_cfg.get("cond_dim", 0))
+        if self.cond_dim:
+            self.cond_vec = nn.Sequential(nn.Linear(self.cond_dim, D), nn.SiLU(), nn.Linear(D, D))
+            nn.init.zeros_(self.cond_vec[2].weight)
+            nn.init.zeros_(self.cond_vec[2].bias)
         self.spatial_proj = nn.Linear(D, D)
         self.word_embed = nn.Linear(self.Cvae, D)
         self.pos_start = nn.Parameter(torch.zeros(1, 1, D))
@@ -125,9 +132,13 @@ class ConditionalVAR(nn.Module):
         # block-wise causal mask: scale k attends to scales <= k (True = attend)
         self.register_buffer("mask", lvl[:, None] >= lvl[None, :], persistent=False)
 
-    def condition(self, lr):
+    def condition(self, lr, g=None):
         feat = self.lr_enc(lr, self.hr_shape)
         c = self.cond_mlp(feat.flatten(2).mean(2))
+        if self.cond_dim:
+            if g is None:
+                raise ValueError("this VAR is conditioned on the measured shower summary g; pass g")
+            c = c + self.cond_vec(g.to(c.dtype))
         sp = torch.cat([down(feat, s).flatten(2).transpose(1, 2) for s in self.scales], 1)
         return c, self.spatial_proj(sp)
 
@@ -146,16 +157,16 @@ class ConditionalVAR(nn.Module):
         shift, scale = self.head_ada(c).view(-1, 1, 2, self.D).unbind(2)
         return self.head(self.head_ln(x) * (1 + scale) + shift)
 
-    def forward(self, lr, x_in):
+    def forward(self, lr, x_in, g=None):
         """Teacher forcing: x_in = vq.idx_to_var_input(gt_idx) -> logits (B, L, V)."""
-        c, sp = self.condition(lr)
+        c, sp = self.condition(lr, g)
         return self._run(self._sequence(c, sp, x_in), c)
 
     @torch.no_grad()
-    def generate(self, lr, vqvae, temperature=1.0, top_k=0, greedy=False, generator=None):
+    def generate(self, lr, vqvae, temperature=1.0, top_k=0, greedy=False, generator=None, g=None):
         """Coarse-to-fine token prediction; the tokenizer decodes them together with the LR image.
         Returns the hard output in normalised log-energy space (exact zeros where no hit)."""
-        c, sp = self.condition(lr)
+        c, sp = self.condition(lr, g)
         B = lr.shape[0]
         f_hat = torch.zeros(B, self.Cvae, *self.scales[-1], device=lr.device)
         inputs = []

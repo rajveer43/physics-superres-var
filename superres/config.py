@@ -12,6 +12,16 @@ ZENODO_RECORD = "6366271"
 # CaloChallenge Dataset 2 radial bin edges in mm (binning_dataset_2.xml).
 CALO_R_EDGES = [0.0, 4.65, 9.3, 13.95, 18.6, 27.9, 37.2, 46.5, 55.8, 65.1]
 
+def _deep_merge(a, b):
+    out = copy.deepcopy(a)
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
 BASE = {
     # Results go to {drive_root}/{dataset}/{run_date}_{version}_{run_tag}/ and every file name starts
     # with {dataset}_{version}_{run_date}_{run_tag}, so no experiment overwrites or mixes with another.
@@ -222,6 +232,112 @@ DATASETS = {
     },
 }
 
+
+# ------------------------------------------------------------------ CaloGAN EM calorimeter
+# Three layers on three different physical grids (all 480 x 480 mm laterally), so each layer is its own
+# 2-D, single-channel dataset (calogan_l0 / _l1 / _l2) and the layers are brought together again by the
+# joint dataset "calogan" (reassembled showers, PID / energy taggers, closure). Array axes are (phi, eta):
+# L0 has 3 phi strips of 160 mm and 96 eta strips of 5 mm, L1 12 x 12 cells of 40 mm, L2 12 phi x 6 eta
+# cells of 40 x 80 mm. The beam hits the centre, so the shower axis is the middle cell boundary (or middle
+# cell for the 3 phi cells of L0); a pooling factor f keeps that symmetry only if it divides half the axis.
+CALOGAN_PARTICLES = ["eplus", "gamma", "piplus"]
+CALOGAN_LAYERS = {
+    "calogan_l0": {
+        "index": 0, "shape": [3, 96], "cell_mm": [160.0, 5.0], "depth_mm": 90.0,
+        "levels": {"lr2": [1, 2], "lr4": [1, 4], "lr8": [3, 8]},
+        "strides": [[1, 2], [1, 2]], "widths": [32, 64, 128],
+        "scales": [[1, 1], [1, 2], [1, 4], [2, 8], [3, 12], [3, 24]],
+    },
+    "calogan_l1": {
+        "index": 1, "shape": [12, 12], "cell_mm": [40.0, 40.0], "depth_mm": 347.0,
+        "levels": {"lr2": [2, 2], "lr4": [3, 3], "lr8": [6, 6]},
+        "strides": [[2, 2]], "widths": [32, 64],
+        "scales": [[1, 1], [2, 2], [3, 3], [4, 4], [6, 6]],
+    },
+    "calogan_l2": {
+        "index": 2, "shape": [12, 6], "cell_mm": [40.0, 80.0], "depth_mm": 43.0,
+        "levels": {"lr2": [2, 1], "lr4": [3, 3], "lr8": [6, 3]},
+        "strides": [[2, 1]], "widths": [32, 64],
+        "scales": [[1, 1], [2, 2], [3, 3], [6, 6]],
+    },
+}
+CALOGAN_LEVELS = ["lr2", "lr4", "lr8"]
+CALOGAN_COND_DIM = 6   # log1p(E_layer / MeV) and E_layer / E_visible, for the three layers (measured at LR too)
+
+# Files read from data.source_dir (default {raw_root}/calogan); the row order is eplus, gamma, piplus.
+_CALOGAN_COMMON = {
+    "family": "calogan",
+    "data": {
+        "source_dir": None,
+        "particles": CALOGAN_PARTICLES,
+        "channels": ["energy"],
+        "circular_dims": [],
+        "pad": [[0, 0], [0, 0]],
+        "split": [0.8, 0.1, 0.1],
+        "n_energy_bins": 10,           # split stratified by particle x E_inc bin (1-100 GeV)
+        "max_per_particle": None,
+        "hit_threshold_mev": 0.01515,  # 15.15 keV, the CaloChallenge readout threshold
+        "threshold_scan_mev": [0.0, 0.01515, 0.1, 1.0],
+        "scale_events": 20000,         # training events used for the per-layer energy scale s_c
+        "train_particles": None,       # e.g. [0, 1]: SR trained on e+ and gamma only (cross-class test)
+        "cond_dim": CALOGAN_COND_DIM,
+    },
+    "vqvae": {
+        "n_res": 1, "z_ch": 16, "codebook_size": 512, "beta": 0.25, "lr": 3e-4, "weight_decay": 0.0,
+        "batch_size": 256, "epochs": 40, "energy_weight": 0.3, "hit_weight": 1.0, "hit_pos_weight": 1.0,
+        "hit_threshold": 0.5, "energy_mask": "soft", "lr_decoder": True, "dead_thresh": 0.01, "patience": 8,
+    },
+    "var": {
+        "depth": 6, "width": 384, "heads": 6, "mlp_ratio": 4.0, "drop": 0.05,
+        "lr_enc_widths": None,         # filled per layer: one more entry than vqvae.strides
+        "cond_dim": CALOGAN_COND_DIM,
+        "lr": 3e-4, "weight_decay": 0.05, "label_smoothing": 0.0, "batch_size": 256, "epochs": 60,
+        "patience": 10, "temperature": 0.8, "top_k": 50, "decode": "greedy", "decodes": ["greedy", "sample"],
+        "gen_splits": ["train", "val", "test"], "gen_overwrite": False, "gen_batch_size": 512,
+        "gen_max_per_split": None, "sr_dtype": "float32",   # cells reach 28 GeV with 1e-3 MeV deposits
+    },
+    # layer datasets: only the classifier two-sample test (HR vs SR) uses this; PID / energy taggers are joint
+    "tagger": {"task": "classification", "arch": "cnn", "widths": [32, 64, 128], "dropout": 0.1, "lr": 1e-3,
+               "weight_decay": 1e-4, "batch_size": 256, "epochs": 20, "patience": 5, "max_train": None,
+               "seeds": [42], "retrain": False},
+    "baselines": {"splits": ["train", "val", "test"], "knn_k": 16, "knn_ref": 60000, "ridge_alpha": 1.0,
+                  "methods": ["template", "ridge"]},
+    "eval": {"max_events": 20000, "c2st_max": 20000, "c2st_epochs": 5, "hist_bins": 40, "n_examples": 4,
+             "methods": ["lr", "sr", "template", "ridge"],
+             "diagnostics": ["vqrec", "sr-greedy", "sr-sample", "uniform", "srproj"],
+             "c2st_methods": ["sr"], "n_energy_bins": 10},
+}
+
+
+def _calogan_layer(name):
+    spec = CALOGAN_LAYERS[name]
+    cfg = _deep_merge(_CALOGAN_COMMON, {
+        "layer": name,
+        "data": {"layer_index": spec["index"], "native_shape": spec["shape"], "hr_shape": spec["shape"],
+                 "cell_mm": spec["cell_mm"], "depth_mm": spec["depth_mm"], "levels": spec["levels"]},
+        "vqvae": {"widths": spec["widths"], "strides": spec["strides"], "scales": spec["scales"]},
+        "var": {"lr_enc_widths": list(spec["widths"])},
+    })
+    return cfg
+
+
+for _name in CALOGAN_LAYERS:
+    DATASETS[_name] = _calogan_layer(_name)
+
+# The joint dataset: no images of its own, it reads the three layer caches and outputs.
+DATASETS["calogan"] = _deep_merge(_CALOGAN_COMMON, {
+    "joint": True,
+    "layers": list(CALOGAN_LAYERS),
+    "data": {"levels": {lvl: None for lvl in CALOGAN_LEVELS}, "native_shape": [504], "hr_shape": [504]},
+    "tagger": {"task": "pid", "arch": "layerstack", "widths": [16, 32, 64], "dropout": 0.2, "lr": 1e-3,
+               "weight_decay": 1e-3, "batch_size": 512, "epochs": 30, "patience": 6, "seeds": [42, 43, 44],
+               "augment": True},
+    "joint": {"energy_bins": 10, "closure_events": 20000, "cross_ref_tag": None},
+})
+for _k in ("vqvae", "var", "baselines"):   # the joint dataset trains no tokenizer or transformer itself
+    DATASETS["calogan"].pop(_k)
+
+
 # Tiny settings to check the whole pipeline end-to-end in a few minutes.
 SMOKE = {
     "qg": {"data.max_samples": 600, "vqvae.epochs": 2, "var.epochs": 2, "tagger.epochs": 2,
@@ -236,17 +352,18 @@ SMOKE = {
              "optuna.vqvae_trials": 2, "optuna.var_trials": 2, "optuna.tagger_trials": 2,
              "optuna.trial_epochs": {"vqvae": 1, "var": 1, "tagger": 1},
              "optuna.trial_max_train": 500},
+    **{name: {"data.max_per_particle": 800, "vqvae.epochs": 2, "var.epochs": 2, "var.depth": 2, "var.width": 64,
+              "var.heads": 2, "var.batch_size": 64, "vqvae.batch_size": 64, "vqvae.codebook_size": 64,
+              "eval.max_events": 300, "eval.c2st_max": 300, "eval.c2st_epochs": 1, "baselines.knn_ref": 500,
+              "optuna.vqvae_trials": 2, "optuna.var_trials": 2, "optuna.tagger_trials": 2,
+              "optuna.trial_epochs": {"vqvae": 1, "var": 1, "tagger": 1}, "optuna.trial_max_train": 200}
+       for name in (*CALOGAN_LAYERS, "calogan")},
 }
-
-
-def _deep_merge(a, b):
-    out = copy.deepcopy(a)
-    for k, v in b.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = copy.deepcopy(v)
-    return out
+for _k in ("calogan",):
+    SMOKE[_k]["tagger.epochs"] = 2
+    SMOKE[_k]["tagger.widths"] = [8, 16, 16]
+    SMOKE[_k]["tagger.seeds"] = [42]
+    SMOKE[_k]["joint.closure_events"] = 300
 
 
 def apply_overrides(cfg, overrides):
@@ -271,7 +388,19 @@ def get_config(dataset, overrides=None, smoke=False):
     if smoke:
         cfg = apply_overrides(cfg, SMOKE[dataset])
         cfg["smoke"] = True
-    return apply_overrides(cfg, overrides)
+    cfg = apply_overrides(cfg, overrides)
+    cfg["family"] = cfg.get("family", dataset)
+    cfg["_overrides"] = dict(overrides or {})   # lets the joint dataset rebuild its layers' configs
+    return cfg
+
+
+def layer_config(cfg, layer):
+    """Config of one calorimeter layer with the same overrides, paths and experiment name as the joint cfg."""
+    return get_config(layer, cfg.get("_overrides"), smoke=bool(cfg.get("smoke")))
+
+
+def layer_configs(cfg):
+    return {name: layer_config(cfg, name) for name in cfg["layers"]}
 
 
 def parse_set_args(items):

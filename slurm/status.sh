@@ -14,6 +14,7 @@ load_experiment "${1:-}"
 exp="$(experiment_dir)"
 pfx="$(prefix)"
 cache="$ROOT/cache/$DATASET"
+[[ "$DATASET" == calogan ]] && cache="$ROOT/cache/calogan_l0"   # the three layer caches are written together
 logdir="$(dirname "$RUN_ENV")"
 
 echo "experiment $EXPERIMENT  ($exp)"
@@ -32,17 +33,37 @@ mark() { if compgen -G "$1" > /dev/null; then echo "done   "; else echo "-      
 echo
 echo "---- finished work"
 echo "$(mark "$cache/meta.json") prepare (HR / LR cache)"
-echo "$(mark "$exp/models/vqvae_tokenizer/metrics.json") tokenizer  models/vqvae_tokenizer"
-for l in "${LEVEL_LIST[@]}"; do
-    echo "$(mark "$exp/models/var_transformer_${l}/metrics.json") transformer models/var_transformer_${l}"
-    echo "$(mark "$cache/test_${pfx}_sr-*_${l}.npy") super-resolved test split, $l"
-    echo "$(mark "$cache/train_${pfx}_sr-*_${l}.npy") super-resolved train split, $l"
-    echo "$(mark "$exp/evaluation/sr_${l}/observables.csv") evaluation evaluation/sr_${l}"
-done
+if [[ "$DATASET" == calogan ]]; then
+    # one tokenizer / transformer / evaluation per calorimeter layer, each in its own experiment folder
+    for L in calogan_l0 calogan_l1 calogan_l2; do
+        lexp="$ROOT/experiments/$L/$EXPERIMENT"
+        lcache="$ROOT/cache/$L"
+        lpfx="${L}_${VERSION}_${RUN_DATE}_${RUN_TAG}"
+        echo "$(mark "$lexp/models/vqvae_tokenizer/metrics.json") tokenizer  $L"
+        for l in "${LEVEL_LIST[@]}"; do
+            echo "$(mark "$lexp/models/var_transformer_${l}/metrics.json") transformer $L $l"
+            echo "$(mark "$lcache/test_${lpfx}_sr-*_${l}.npy") SR test split  $L $l"
+            echo "$(mark "$lcache/test_base-template_${l}.npy") baselines     $L $l"
+            echo "$(mark "$lexp/evaluation/sr_${l}/observables.csv") evaluation   $L $l"
+        done
+    done
+    for l in "${LEVEL_LIST[@]}"; do
+        echo "$(mark "$exp/evaluation/sr_${l}/observables_by_class.csv") shower evaluation (reassembled) $l"
+    done
+else
+    echo "$(mark "$exp/models/vqvae_tokenizer/metrics.json") tokenizer  models/vqvae_tokenizer"
+    for l in "${LEVEL_LIST[@]}"; do
+        echo "$(mark "$exp/models/var_transformer_${l}/metrics.json") transformer models/var_transformer_${l}"
+        echo "$(mark "$cache/test_${pfx}_sr-*_${l}.npy") super-resolved test split, $l"
+        echo "$(mark "$cache/train_${pfx}_sr-*_${l}.npy") super-resolved train split, $l"
+        echo "$(mark "$exp/evaluation/sr_${l}/observables.csv") evaluation evaluation/sr_${l}"
+    done
+fi
 arch=resnet18                 # the qg default (superres/config.py); calo is always cnn
 [[ "$EXTRA_SET" == *tagger.arch=*cnn* ]] && arch=cnn
 tagger_model=${arch}_tagger
 [[ "$DATASET" == calo ]] && tagger_model=cnn_regressor
+[[ "$DATASET" == calogan ]] && tagger_model=layerstack_tagger
 for group in early late; do
     while read -r kind seed; do
         echo "$(mark "$exp/models/${tagger_model}_${kind/:/-}_seed${seed}/metrics.json") tagger     models/${tagger_model}_${kind/:/-}_seed${seed}"

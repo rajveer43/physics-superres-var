@@ -5,7 +5,12 @@
     python -m superres.pipeline --dataset qg --stages all --smoke        # quick end-to-end check
 
 Stages (in order): download, prepare, tune_vqvae, train_vqvae, tune_var, train_var,
-generate, eval_sr, tune_tagger, train_taggers, tagger_xeval, summarize
+generate, baselines, eval_sr, tune_tagger, train_taggers, tagger_xeval, summarize
+
+calogan: the dataset "calogan" is three layer datasets (calogan_l0, _l1, _l2, each a 2-D problem on its own grid)
+plus the shower. The stages from tune_vqvae to baselines run once per layer; eval_sr evaluates every layer and
+then the reassembled showers; train_taggers / tagger_xeval / summarize work on whole showers (PID, energy).
+A single layer can be run on its own with --dataset calogan_l1.
 
 tagger_xeval: training curves of every tagger, and the 2x3 table (a tagger trained on HR only,
 applied to HR / uniformly up-sampled LR / SR, next to a tagger trained on each input).
@@ -16,18 +21,63 @@ from . import tuning
 from .config import apply_overrides, get_config, parse_set_args
 
 ORDER = ["download", "prepare", "tune_vqvae", "train_vqvae", "tune_var", "train_var",
-         "generate", "eval_sr", "tune_tagger", "train_taggers", "tagger_xeval", "summarize"]
+         "generate", "baselines", "eval_sr", "tune_tagger", "train_taggers", "tagger_xeval", "summarize"]
+PER_LAYER = ("tune_vqvae", "train_vqvae", "tune_var", "train_var", "generate", "baselines")
 
 
 def tagger_kinds(cfg, levels=None):
+    if cfg.get("joint"):
+        from .joint import joint_tagger_kinds
+        return joint_tagger_kinds(cfg, levels)
     kinds = ["hr"]
     for lvl in levels or cfg["data"]["levels"]:
         kinds += [f"lr:{lvl}", f"sr:{lvl}"]  # sr = model output as generated, no energy correction
     return kinds
 
 
-def run_stage(cfg, stage, levels=None, kinds=None, seeds=None):
+def run_joint_stage(cfg, stage, levels, kinds, seeds):
+    """Stages of the dataset 'calogan': per-layer work is delegated to the layer datasets."""
+    from .config import layer_configs
+    if stage in ("download", "prepare"):
+        return run_stage(dict(cfg, joint=False), stage, levels, kinds, seeds)
+    if stage in PER_LAYER:
+        return {name: run_stage(c, stage, levels, kinds, seeds) for name, c in layer_configs(cfg).items()}
     levels = levels or list(cfg["data"]["levels"])
+    if stage == "eval_sr":
+        for name, c in layer_configs(cfg).items():
+            print(f"\n--- {name}")
+            run_stage(c, stage, levels, kinds, seeds)
+        from .joint import evaluate_joint
+        print("\n--- reassembled showers")
+        return {lvl: evaluate_joint(cfg, lvl) for lvl in levels}
+    if stage == "tune_tagger":
+        print("tune_tagger: the shower tagger uses the fixed settings of tagger.* (no Optuna study)")
+        return None
+    if stage == "train_taggers":
+        from .joint import train_joint_taggers
+        return train_joint_taggers(cfg, levels, kinds, seeds)
+    if stage == "tagger_xeval":
+        from .joint import joint_cross_eval
+        return {lvl: joint_cross_eval(cfg, lvl, seeds) for lvl in levels}
+    if stage == "summarize":
+        from .evaluate import summarize
+        from .joint import summarize_joint
+        for name, c in layer_configs(cfg).items():
+            summarize(c)
+        return summarize_joint(cfg)
+    raise ValueError(f"unknown stage {stage}; choose from {ORDER}")
+
+
+def run_stage(cfg, stage, levels=None, kinds=None, seeds=None):
+    if cfg.get("joint"):
+        return run_joint_stage(cfg, stage, levels, kinds, seeds)
+    levels = levels or list(cfg["data"]["levels"])
+    if cfg.get("family") == "calogan" and stage in ("tune_tagger", "train_taggers", "tagger_xeval"):
+        print(f"{stage}: {cfg['dataset']} is one layer; PID and energy taggers need whole showers (dataset calogan)")
+        return None
+    if stage == "baselines":
+        from .baselines import run_baselines
+        return run_baselines(cfg, levels)
     if stage == "download":
         from .download import download
         return download(cfg)
@@ -122,7 +172,7 @@ def run(dataset, stages, overrides=None, smoke=False, levels=None, kinds=None, s
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", required=True, choices=["qg", "calo"])
+    p.add_argument("--dataset", required=True, choices=["qg", "calo", "calogan", "calogan_l0", "calogan_l1", "calogan_l2"])
     p.add_argument("--stages", default="all", help=f"comma list from {ORDER} or 'all'")
     p.add_argument("--levels", default=None, help="comma list of LR levels (default: all)")
     p.add_argument("--kinds", default=None, help="comma list of tagger inputs, e.g. hr,var:pool4x4")
